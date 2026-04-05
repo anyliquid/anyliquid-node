@@ -11,3 +11,6 @@ pub const RestServer = @import("rest.zig").RestServer;
 pub const RestConfig = @import("rest.zig").RestConfig;
 pub const WsServer = @import("websocket.zig").WsServer;
 pub const WsConfig = @import("websocket.zig").WsConfig;
+pub const ConnId = @import("websocket.zig").ConnId;
+pub const SubscriptionManager = @import("websocket.zig").SubscriptionManager;
+pub const Subscription = @import("websocket.zig").Subscription;

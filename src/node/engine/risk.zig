@@ -63,6 +63,8 @@ pub const RiskEngine = struct {
         state: *state_mod.GlobalState,
     ) !void {
         _ = state;
+        try self.checkMarginBeforeTrade(taker.user, taker.asset_id, taker.is_buy, fill_size, fill_px);
+        try self.checkMarginBeforeTrade(maker.user, maker.asset_id, maker.is_buy, fill_size, fill_px);
         try self.applyTrade(taker.user, taker.asset_id, taker.is_buy, fill_size, fill_px);
         try self.applyTrade(maker.user, maker.asset_id, maker.is_buy, fill_size, fill_px);
         try self.refreshExposure(taker.asset_id);
@@ -121,11 +123,49 @@ pub const RiskEngine = struct {
         side: shared.types.Side,
         state: *state_mod.GlobalState,
     ) !void {
-        _ = self;
-        _ = asset_id;
-        _ = side;
         _ = state;
-        // ADL is represented by the liquidation center metric for now.
+        var candidates = std.ArrayList(struct { addr: shared.types.Address, rank: f64 }).init(self.allocator);
+        defer candidates.deinit();
+
+        var accounts_it = self.accounts.iterator();
+        while (accounts_it.next()) |entry| {
+            if (entry.value_ptr.positions.get(asset_id)) |pos| {
+                if (pos.side != side) continue;
+                const mark_px = self.perp.markPrice(pos.asset_id) orelse pos.entry_price;
+                const rank = adlRank(&pos, mark_px);
+                try candidates.append(.{ .addr = entry.key_ptr.*, .rank = rank });
+            }
+        }
+
+        if (candidates.items.len == 0) return;
+
+        std.sort.blocking(
+            struct { addr: shared.types.Address, rank: f64 },
+            candidates.items,
+            {},
+            struct {
+                fn lessThan(_: void, a: @This(), b: @This()) bool {
+                    return a.rank > b.rank;
+                }
+            }.lessThan,
+        );
+
+        const top = candidates.items[0];
+        const account_ptr = self.accounts.getPtr(top.addr);
+        if (account_ptr) |acc| {
+            if (acc.positions.getPtr(asset_id)) |pos| {
+                const mark_px = self.perp.markPrice(asset_id) orelse pos.entry_price;
+                const close_size = @min(pos.size, pos.size / 2 + 1);
+                const pnl = perp_mod.PerpEngine.unrealizedPnl(pos, mark_px);
+                if (pnl < 0 and self.perp.liquidation_center.insurance_fund + pnl < 0) {
+                    self.perp.liquidation_center.adl_invocations += 1;
+                }
+                pos.size -= close_size;
+                if (pos.size == 0) {
+                    _ = acc.positions.remove(asset_id);
+                }
+            }
+        }
     }
 
     pub fn getAccountHealth(
@@ -178,6 +218,30 @@ pub const RiskEngine = struct {
             gop.value_ptr.* = AccountLedger.init(self.allocator, DEFAULT_BALANCE);
         }
         return gop.value_ptr;
+    }
+
+    fn checkMarginBeforeTrade(
+        self: *RiskEngine,
+        addr: shared.types.Address,
+        asset_id: shared.types.AssetId,
+        is_buy: bool,
+        fill_size: shared.types.Quantity,
+        fill_px: shared.types.Price,
+    ) !void {
+        const account = self.accounts.getPtr(addr) orelse return;
+        const existing_pos = account.positions.get(asset_id);
+
+        if (existing_pos) |pos| {
+            if (pos.side == (if (is_buy) shared.types.Side.long else .short)) {
+                return;
+            }
+        }
+
+        const im_req = initialMarginRequired(fill_size, fill_px);
+        const equity: shared.types.SignedAmount = @intCast(account.balance);
+        if (equity < im_req) {
+            return RiskError.InsufficientMargin;
+        }
     }
 
     fn applyTrade(
@@ -274,4 +338,22 @@ fn positionNotional(size: shared.types.Quantity, price: shared.types.Price) shar
 fn maintenanceMarginRequired(size: shared.types.Quantity, price: shared.types.Price) shared.types.SignedAmount {
     const notional = positionNotional(size, price);
     return @intCast(@divTrunc((@as(i512, @intCast(notional)) * MAINTENANCE_BPS), BPS_SCALE));
+}
+
+fn initialMarginRequired(size: shared.types.Quantity, price: shared.types.Price) shared.types.SignedAmount {
+    const notional = positionNotional(size, price);
+    const im_bps: i256 = 1000;
+    return @intCast(@divTrunc((@as(i512, @intCast(notional)) * im_bps), BPS_SCALE));
+}
+
+pub fn adlRank(pos: *const shared.types.Position, mark_px: shared.types.Price) f64 {
+    const upnl_f: f64 = @floatFromInt(perp_mod.PerpEngine.unrealizedPnl(pos, mark_px));
+    const size_f: f64 = @floatFromInt(pos.size);
+    const mark_f: f64 = @floatFromInt(mark_px);
+    const margin_f: f64 = @floatFromInt(pos.isolated_margin);
+    if (margin_f == 0 or mark_f == 0 or size_f == 0) return 0;
+    const notional = size_f * mark_f / @as(f64, @floatFromInt(shared.types.PRICE_SCALE));
+    const pnl_ratio = upnl_f / notional;
+    const leverage = notional / margin_f;
+    return pnl_ratio * leverage;
 }

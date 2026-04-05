@@ -38,7 +38,7 @@ pub const App = struct {
             .gateway = gateway,
             .mempool = mempool,
             .store = store,
-            .state = node.GlobalState.init(),
+            .state = try node.GlobalState.init(allocator),
         };
     }
 

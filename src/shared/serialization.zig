@@ -1036,3 +1036,118 @@ test "action request round-trips through shared serialization" {
     try std.testing.expectEqualStrings("order", decoded.action.order.type);
     try std.testing.expectEqualStrings("100.25", decoded.action.order.orders[0].p);
 }
+
+pub fn encodeQueryRequest(allocator: std.mem.Allocator, req: protocol.QueryRequest) ![]u8 {
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+
+    const tag: u8 = switch (req) {
+        .user_state => 0x01,
+        .open_orders => 0x02,
+        .l2_book => 0x03,
+        .all_mids => 0x04,
+    };
+    try buf.append(allocator, tag);
+
+    switch (req) {
+        .user_state => |addr| try buf.appendSlice(allocator, &addr),
+        .open_orders => |addr| try buf.appendSlice(allocator, &addr),
+        .l2_book => |params| {
+            var asset_bytes: [8]u8 = undefined;
+            std.mem.writeInt(u64, &asset_bytes, params.asset_id, .big);
+            try buf.appendSlice(allocator, &asset_bytes);
+            var depth_bytes: [4]u8 = undefined;
+            std.mem.writeInt(u32, &depth_bytes, params.depth, .big);
+            try buf.appendSlice(allocator, &depth_bytes);
+        },
+        .all_mids => {},
+    }
+
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn decodeQueryRequest(allocator: std.mem.Allocator, data: []const u8) !protocol.QueryRequest {
+    _ = allocator;
+    if (data.len < 1) return error.UnexpectedEndOfStream;
+    const tag = data[0];
+    return switch (tag) {
+        0x01 => .{ .user_state = data[1..21].* },
+        0x02 => .{ .open_orders = data[1..21].* },
+        0x03 => .{ .l2_book = .{
+            .asset_id = std.mem.readInt(u64, data[1..9], .big),
+            .depth = std.mem.readInt(u32, data[9..13], .big),
+        } },
+        0x04 => .{ .all_mids = {} },
+        else => error.InvalidTag,
+    };
+}
+
+pub fn encodeQueryResponse(allocator: std.mem.Allocator, resp: protocol.QueryResponse) ![]u8 {
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+
+    const tag: u8 = switch (resp) {
+        .user_state => 0x81,
+        .open_orders => 0x82,
+        .l2_book => 0x83,
+        .all_mids => 0x84,
+        .not_found => 0x8F,
+    };
+    try buf.append(allocator, tag);
+
+    switch (resp) {
+        .user_state => |state| {
+            try buf.appendSlice(allocator, &state.address);
+            var bal_bytes: [16]u8 = undefined;
+            std.mem.writeInt(u128, &bal_bytes, state.balance, .big);
+            try buf.appendSlice(allocator, &bal_bytes);
+        },
+        .open_orders => |orders| {
+            var len_bytes: [4]u8 = undefined;
+            std.mem.writeInt(u32, &len_bytes, @intCast(orders.len), .big);
+            try buf.appendSlice(allocator, &len_bytes);
+            for (orders) |oid| {
+                var oid_bytes: [8]u8 = undefined;
+                std.mem.writeInt(u64, &oid_bytes, oid, .big);
+                try buf.appendSlice(allocator, &oid_bytes);
+            }
+        },
+        .l2_book => |book| {
+            var asset_bytes: [8]u8 = undefined;
+            std.mem.writeInt(u64, &asset_bytes, book.asset_id, .big);
+            try buf.appendSlice(allocator, &asset_bytes);
+            var seq_bytes: [8]u8 = undefined;
+            std.mem.writeInt(u64, &seq_bytes, book.seq, .big);
+            try buf.appendSlice(allocator, &seq_bytes);
+        },
+        .all_mids => {},
+        .not_found => {},
+    }
+
+    return try buf.toOwnedSlice(allocator);
+}
+
+pub fn decodeQueryResponse(allocator: std.mem.Allocator, data: []const u8) !protocol.QueryResponse {
+    _ = allocator;
+    if (data.len < 1) return error.UnexpectedEndOfStream;
+    const tag = data[0];
+    return switch (tag) {
+        0x81 => .{ .user_state = .{
+            .address = data[1..21].*,
+            .balance = std.mem.readInt(u64, data[21..29], .big),
+            .positions = &.{},
+            .open_orders = &.{},
+            .api_wallet = null,
+        } },
+        0x82 => .{ .open_orders = &.{} },
+        0x83 => .{ .l2_book = .{
+            .asset_id = std.mem.readInt(u64, data[1..9], .big),
+            .seq = std.mem.readInt(u64, data[9..17], .big),
+            .bids = &.{},
+            .asks = &.{},
+            .is_snapshot = true,
+        } },
+        0x84 => .{ .all_mids = .{} },
+        else => error.InvalidTag,
+    };
+}

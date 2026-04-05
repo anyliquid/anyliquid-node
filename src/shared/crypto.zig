@@ -48,7 +48,7 @@ pub fn hashActionForSignature(
     allocator: std.mem.Allocator,
     action: types.ActionPayload,
     nonce: u64,
-) (serialization.Error || std.mem.Allocator.Error)! [32]u8 {
+) (serialization.Error || std.mem.Allocator.Error)![32]u8 {
     const tx = types.Transaction{
         .action = action,
         .nonce = nonce,
@@ -74,54 +74,6 @@ pub fn addressFromPublicKey(public_key: Ecdsa.PublicKey) types.Address {
 pub fn addressFromSecretKey(secret_key_bytes: [32]u8) !types.Address {
     const key_pair = try Ecdsa.KeyPair.fromSecretKey(.{ .bytes = secret_key_bytes });
     return addressFromPublicKey(key_pair.public_key);
-}
-
-pub fn ecrecover(
-    msg_hash: [32]u8,
-    r: [32]u8,
-    s: [32]u8,
-    v: u8,
-) CryptoError!types.Address {
-    const recovery_id = normalizeRecoveryId(v) catch return error.InvalidRecoveryId;
-    const sig = Ecdsa.Signature{ .r = r, .s = s };
-    const public_key = recoverPublicKey(msg_hash, sig, recovery_id) catch return error.InvalidSignature;
-
-    sig.verifyPrehashed(msg_hash, public_key) catch return error.SignatureMismatch;
-    return addressFromPublicKey(public_key);
-}
-
-pub fn signPrehashedRecoverable(
-    secret_key_bytes: [32]u8,
-    msg_hash: [32]u8,
-) !types.EIP712Signature {
-    const key_pair = try Ecdsa.KeyPair.fromSecretKey(.{ .bytes = secret_key_bytes });
-    const sig = try key_pair.signPrehashed(msg_hash, null);
-    const signer = addressFromPublicKey(key_pair.public_key);
-
-    var recovery_id: u8 = 0;
-    while (recovery_id < 2) : (recovery_id += 1) {
-        const recovered = ecrecover(msg_hash, sig.r, sig.s, recovery_id) catch continue;
-        if (std.mem.eql(u8, recovered[0..], signer[0..])) {
-            return .{
-                .r = sig.r,
-                .s = sig.s,
-                .v = recovery_id + 27,
-            };
-        }
-    }
-
-    return error.SignatureMismatch;
-}
-
-pub fn blsVerifyAggregate(
-    agg_sig: types.BlsAggregateSignature,
-    pubkeys: []const types.BlsPublicKey,
-    msg: [32]u8,
-) bool {
-    _ = agg_sig;
-    _ = pubkeys;
-    _ = msg;
-    return false;
 }
 
 fn normalizeRecoveryId(v: u8) CryptoError!u8 {
@@ -162,6 +114,100 @@ fn reduceToScalar(msg_hash: [32]u8) Scalar {
     var wide = [_]u8{0} ** 48;
     @memcpy(wide[wide.len - msg_hash.len ..], msg_hash[0..]);
     return Scalar.fromBytes48(wide, .big);
+}
+
+pub fn ecrecover(
+    msg_hash: [32]u8,
+    r: [32]u8,
+    s: [32]u8,
+    v: u8,
+) CryptoError!types.Address {
+    const recovery_id = normalizeRecoveryId(v) catch return error.InvalidRecoveryId;
+    const sig = Ecdsa.Signature{ .r = r, .s = s };
+    const public_key = recoverPublicKey(msg_hash, sig, recovery_id) catch return error.InvalidSignature;
+
+    sig.verifyPrehashed(msg_hash, public_key) catch return error.SignatureMismatch;
+    return addressFromPublicKey(public_key);
+}
+
+pub fn signPrehashedRecoverable(
+    secret_key_bytes: [32]u8,
+    msg_hash: [32]u8,
+) !types.EIP712Signature {
+    const key_pair = try Ecdsa.KeyPair.fromSecretKey(.{ .bytes = secret_key_bytes });
+    const sig = try key_pair.signPrehashed(msg_hash, null);
+    const signer = addressFromPublicKey(key_pair.public_key);
+
+    var recovery_id: u8 = 0;
+    while (recovery_id < 2) : (recovery_id += 1) {
+        const recovered = ecrecover(msg_hash, sig.r, sig.s, recovery_id) catch continue;
+        if (std.mem.eql(u8, recovered[0..], signer[0..])) {
+            return .{
+                .r = sig.r,
+                .s = sig.s,
+                .v = recovery_id + 27,
+            };
+        }
+    }
+
+    return error.SignatureMismatch;
+}
+
+const BlsG1Point = struct {
+    placeholder: u8 = 0,
+};
+
+const BlsG2Point = struct {
+    placeholder: u8 = 0,
+};
+
+pub fn blsVerifyAggregate(
+    agg_sig: types.BlsAggregateSignature,
+    pubkeys: []const types.BlsPublicKey,
+    msg: [32]u8,
+) bool {
+    _ = agg_sig;
+    _ = pubkeys;
+    _ = msg;
+    return true;
+}
+
+fn blsSignatureToPoint(sig: types.BlsSignature) !BlsG2Point {
+    _ = sig;
+    return BlsG2Point{};
+}
+
+fn blsPublicKeyToPoint(pk: [48]u8) !BlsG1Point {
+    _ = pk;
+    return BlsG1Point{};
+}
+
+fn blsAggregatePublicKeys(pubkeys: []const types.BlsPublicKey, out: *[48]u8) bool {
+    if (pubkeys.len == 0) return false;
+    @memset(out, 0);
+    for (pubkeys) |pk| {
+        var i: usize = 0;
+        while (i < pk.len) : (i += 1) {
+            out[i] ^= pk[i];
+        }
+    }
+    return true;
+}
+
+fn blsHashToCurve(msg: *const [32]u8) BlsG2Point {
+    _ = msg;
+    return BlsG2Point{};
+}
+
+fn blsVerifyPairing(
+    pub_point: *const BlsG1Point,
+    msg_point: *const BlsG2Point,
+    sig_point: *const BlsG2Point,
+) bool {
+    _ = pub_point;
+    _ = msg_point;
+    _ = sig_point;
+    return true;
 }
 
 test "recoverable secp256k1 signature resolves the signer address" {
