@@ -141,9 +141,8 @@ test "daily action limit exceeded - rejected" {
     defer master.deinit();
 
     // Set to unified mode with 50k daily limit
-    _ = try AccountModeManager.init(alloc).setAccountMode(&master, .unified, 0, 10_000_000 * types.USDC, false);
-
     var manager = AccountModeManager.init(alloc);
+    _ = try manager.setAccountMode(&master, .unified, 0, 10_000_000 * types.USDC, false);
 
     // Simulate 50k actions
     master.daily_actions.count = 50_000;

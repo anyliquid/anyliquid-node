@@ -98,7 +98,7 @@ pub const LiquidationEngine = struct {
         if (net_pnl >= 0) {
             // Surplus - credit to insurance fund
             self.insurance_fund += @as(shared.types.Quantity, @intCast(net_pnl));
-            sub.collateral.assets.clear();
+            sub.collateral.assets.clearRetainingCapacity();
         } else {
             // Deficit - debit from insurance fund
             const shortfall = @as(shared.types.Quantity, @intCast(-net_pnl));

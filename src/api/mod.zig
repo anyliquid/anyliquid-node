@@ -1,5 +1,7 @@
 pub const Auth = @import("auth.zig").Auth;
 pub const AuthConfig = @import("auth.zig").AuthConfig;
+pub const AuthError = @import("auth.zig").AuthError;
+pub const Bucket = @import("auth.zig").Bucket;
 pub const Gateway = @import("gateway.zig").Gateway;
 pub const GatewayConfig = @import("gateway.zig").GatewayConfig;
 pub const GatewayError = @import("gateway.zig").GatewayError;

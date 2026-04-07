@@ -211,18 +211,19 @@ pub const CollateralPool = struct {
         const total = self.effectiveTotal(registry);
         if (total < amount) return error.InsufficientCollateral;
 
-        var sorted = std.ArrayList(struct { asset_id: types.AssetId, haircut: f64, balance: shared.types.Quantity }).init(self.allocator);
-        defer sorted.deinit();
+        const DebitEntry = struct { asset_id: types.AssetId, haircut: f64, balance: shared.types.Quantity };
+        var sorted = std.ArrayList(DebitEntry).empty;
+        defer sorted.deinit(self.allocator);
 
         var it = self.assets.iterator();
         while (it.next()) |entry| {
             if (findEntry(registry, entry.key_ptr.*)) |e| {
-                try sorted.append(.{ .asset_id = entry.key_ptr.*, .haircut = e.haircut_pct, .balance = entry.value_ptr.* });
+                try sorted.append(self.allocator, .{ .asset_id = entry.key_ptr.*, .haircut = e.haircut_pct, .balance = entry.value_ptr.* });
             }
         }
 
-        std.mem.sort(struct { asset_id: types.AssetId, haircut: f64, balance: shared.types.Quantity }, sorted.items, {}, struct {
-            fn lessThan(_: void, a: @This(), b: @This()) bool {
+        std.mem.sort(DebitEntry, sorted.items, {}, struct {
+            fn lessThan(_: void, a: DebitEntry, b: DebitEntry) bool {
                 return a.haircut < b.haircut;
             }
         }.lessThan);
@@ -249,20 +250,20 @@ pub const CollateralPool = struct {
     }
 
     pub fn snapshot(self: *const CollateralPool, registry: types.CollateralRegistry, alloc: std.mem.Allocator) ![]types.AssetBalance {
-        var result = std.ArrayList(types.AssetBalance).init(alloc);
-        errdefer result.deinit();
+        var result = std.ArrayList(types.AssetBalance).empty;
+        errdefer result.deinit(alloc);
 
         var it = self.assets.iterator();
         while (it.next()) |entry| {
             const eff = effectiveValue(registry, entry.key_ptr.*, entry.value_ptr.*);
-            try result.append(.{
+            try result.append(alloc, .{
                 .asset_id = entry.key_ptr.*,
                 .raw_amount = entry.value_ptr.*,
                 .effective_usdc = eff,
             });
         }
 
-        return try result.toOwnedSlice();
+        return try result.toOwnedSlice(alloc);
     }
 };
 

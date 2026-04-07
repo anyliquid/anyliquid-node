@@ -143,8 +143,8 @@ test "intra-master transfer - moves asset between sub-accounts" {
 
     const event = try engine.executeIntraMaster(0, 1, types.USDC_ID, 3_000 * types.USDC, &master, &state);
 
-    try std.testing.expect(event.from_addr == sub0.address);
-    try std.testing.expect(event.to_addr == sub1.address);
+    try std.testing.expect(std.mem.eql(u8, &event.from_addr, &sub0.address));
+    try std.testing.expect(std.mem.eql(u8, &event.to_addr, &sub1.address));
     try std.testing.expect(event.amount == 3_000 * types.USDC);
 
     try std.testing.expectEqual(7_000 * types.USDC, sub0.collateral.rawBalance(types.USDC_ID));
@@ -288,7 +288,7 @@ test "deposit - credits sub-account balance" {
 
     const event = try engine.executeDeposit(0, types.USDC_ID, 5_000 * types.USDC, &master, &state);
 
-    try std.testing.expect(event.to_addr == sub0.address);
+    try std.testing.expect(std.mem.eql(u8, &event.to_addr, &sub0.address));
     try std.testing.expect(event.amount == 5_000 * types.USDC);
     try std.testing.expectEqual(5_000 * types.USDC, sub0.collateral.rawBalance(types.USDC_ID));
 }

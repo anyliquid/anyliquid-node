@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm *)",
+      "Bash(_ *)",
+      "Bash(\"src/shared/fixed_point.zig\")",
+      "Bash(\"src/shared/crypto.zig\")",
+      "Bash(\"src/shared/protocol.zig\")",
+      "Bash(\"src/api/auth.zig\")",
+      "Bash(eof)"
+    ]
+  },
+  "$version": 3
+}

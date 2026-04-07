@@ -151,11 +151,11 @@ pub const OptionsClearingUnit = struct {
         sub: *account.SubAccount,
         now_ms: i64,
     ) ![]types.OptionExpiredEvent {
-        var events = std.ArrayList(types.OptionExpiredEvent).init(self.allocator);
-        errdefer events.deinit();
+        var events = std.ArrayList(types.OptionExpiredEvent).empty;
+        errdefer events.deinit(self.allocator);
 
-        var to_remove = std.ArrayList(types.InstrumentId).init(self.allocator);
-        defer to_remove.deinit();
+        var to_remove = std.ArrayList(types.InstrumentId).empty;
+        defer to_remove.deinit(self.allocator);
 
         var it = sub.positions.iterator();
         while (it.next()) |entry| {
@@ -181,14 +181,14 @@ pub const OptionsClearingUnit = struct {
                 try sub.collateral.withdraw(types.USDC_ID, payout);
             }
 
-            try events.append(.{
+            try events.append(self.allocator, .{
                 .instrument_id = pos.instrument_id,
                 .intrinsic_value = intrinsic,
                 .payout = payout,
                 .timestamp = now_ms,
             });
 
-            try to_remove.append(pos.instrument_id);
+            try to_remove.append(self.allocator, pos.instrument_id);
         }
 
         // Remove settled positions
@@ -196,7 +196,7 @@ pub const OptionsClearingUnit = struct {
             _ = sub.positions.remove(inst_id);
         }
 
-        return try events.toOwnedSlice();
+        return try events.toOwnedSlice(self.allocator);
     }
 };
 

@@ -398,10 +398,13 @@ test "SMT root changes after an update" {
 
 test "committed block is retrievable by height" {
     const alloc = std.testing.allocator;
-    const tmp_dir = std.testing.tmpDir(.{});
+    var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    var store = try Store.init(.{ .data_dir = tmp_dir.path }, alloc);
+    const path = try std.fmt.allocPrint(alloc, "{s}/test-store", .{tmp_dir.sub_path});
+    defer alloc.free(path);
+
+    var store = try Store.init(.{ .data_dir = path }, alloc);
     defer store.deinit();
 
     const block = shared.types.Block{

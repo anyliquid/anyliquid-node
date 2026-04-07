@@ -98,7 +98,33 @@ fn cacheNodeEvent(ctx: ?*anyopaque, event: shared.protocol.NodeEvent) void {
 }
 
 test {
+    // Shared layer
     _ = @import("shared/fixed_point.zig");
+    _ = @import("shared/crypto.zig");
+    _ = @import("shared/protocol.zig");
+    _ = @import("shared/serialization.zig");
+
+    // API layer
     _ = @import("api/auth.zig");
+    _ = @import("api/state_cache.zig");
+
+    // Node layer - Clearinghouse
+    _ = @import("node/clearinghouse/types.zig");
+    _ = @import("node/clearinghouse/account.zig");
+    _ = @import("node/clearinghouse/account_mode.zig");
+    _ = @import("node/clearinghouse/spot.zig");
+    _ = @import("node/clearinghouse/perp.zig");
+    _ = @import("node/clearinghouse/options.zig");
+    _ = @import("node/clearinghouse/margin.zig");
+    _ = @import("node/clearinghouse/liquidation.zig");
+    _ = @import("node/clearinghouse/transfer.zig");
+    _ = @import("node/clearinghouse/portfolio.zig");
+    _ = @import("node/clearinghouse/router.zig");
+    _ = @import("node/clearinghouse/mod.zig");
+
+    // Node layer - Other
     _ = @import("node/mempool.zig");
+    _ = @import("node/store/mod.zig");
+    _ = @import("node/consensus/mod.zig");
+    _ = @import("node/oracle/mod.zig");
 }

@@ -657,5 +657,5 @@ test "DailyActionCounter rejects when limit exceeded" {
 test "nextMidnightUtc computes correctly" {
     const midnight = nextMidnightUtc(1_700_000_000_000);
     try std.testing.expect(midnight > 1_700_000_000_000);
-    try std.testing.expect(midnight % 86_400_000 == 0);
+    try std.testing.expect(@rem(midnight, 86_400_000) == 0);
 }

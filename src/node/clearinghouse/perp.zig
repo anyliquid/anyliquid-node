@@ -138,6 +138,14 @@ test "perp long - open, increase VWAP, partial close" {
 
     const fill1 = types.Fill{
         .instrument_id = 1,
+        .instrument_kind = .{ .perp = .{
+            .tick_size = 1,
+            .lot_size = 1,
+            .max_leverage = 50,
+            .funding_interval_ms = 3_600_000,
+            .mark_method = .oracle,
+            .isolated_only = false,
+        } },
         .taker = sub.address,
         .maker = [_]u8{0xBB} ** 20,
         .taker_order_id = 1,
@@ -151,6 +159,14 @@ test "perp long - open, increase VWAP, partial close" {
 
     const fill2 = types.Fill{
         .instrument_id = 1,
+        .instrument_kind = .{ .perp = .{
+            .tick_size = 1,
+            .lot_size = 1,
+            .max_leverage = 50,
+            .funding_interval_ms = 3_600_000,
+            .mark_method = .oracle,
+            .isolated_only = false,
+        } },
         .taker = sub.address,
         .maker = [_]u8{0xBB} ** 20,
         .taker_order_id = 3,
@@ -168,6 +184,14 @@ test "perp long - open, increase VWAP, partial close" {
 
     const fill3 = types.Fill{
         .instrument_id = 1,
+        .instrument_kind = .{ .perp = .{
+            .tick_size = 1,
+            .lot_size = 1,
+            .max_leverage = 50,
+            .funding_interval_ms = 3_600_000,
+            .mark_method = .oracle,
+            .isolated_only = false,
+        } },
         .taker = sub.address,
         .maker = [_]u8{0xBB} ** 20,
         .taker_order_id = 5,
