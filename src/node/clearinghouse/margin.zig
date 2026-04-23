@@ -52,7 +52,7 @@ pub const MarginEngine = struct {
             .transfer_margin_req = transferMarginRequired(sub, state),
             .margin_ratio = if (total_mm > 0) @as(f64, @floatFromInt(equity)) / @as(f64, @floatFromInt(total_mm)) else 0,
             .health = classifyHealth(equity, total_im, total_mm),
-            .collateral_breakdown = &.{},
+            .collateral_breakdown = buildCollateralBreakdown(sub, &collateral_registry),
         };
     }
 
@@ -91,7 +91,7 @@ pub const MarginEngine = struct {
             .transfer_margin_req = transferMarginRequired(sub, state),
             .margin_ratio = if (total_mm > 0) @as(f64, @floatFromInt(equity)) / @as(f64, @floatFromInt(total_mm)) else 0,
             .health = classifyHealth(equity, total_im, total_mm),
-            .collateral_breakdown = &.{},
+            .collateral_breakdown = buildCollateralBreakdown(sub, &collateral_registry),
         };
     }
 
@@ -101,12 +101,7 @@ pub const MarginEngine = struct {
             return self.computeUnified(sub, state);
         }
 
-        const ratio = portfolio_mod.PortfolioMargin.portfolioMarginRatio(sub, state, struct {
-            fn getPrice(asset_id: types.AssetId) shared.types.Price {
-                _ = asset_id;
-                return 100_000; // TODO: Get from oracle
-            }
-        }.getPrice);
+        const ratio = portfolio_mod.PortfolioMargin.portfolioMarginRatio(sub, state);
 
         const health = types.classifyPortfolioHealth(ratio);
 
@@ -144,7 +139,7 @@ pub const MarginEngine = struct {
             .transfer_margin_req = transferMarginRequired(sub, state),
             .margin_ratio = ratio,
             .health = health,
-            .collateral_breakdown = &.{},
+            .collateral_breakdown = buildCollateralBreakdown(sub, &collateral_registry),
         };
     }
 
@@ -197,6 +192,7 @@ pub const GlobalState = struct {
     markPriceFn: *const fn (types.InstrumentId) ?shared.types.Price,
     markPriceMetaFn: ?*const fn (types.InstrumentId) ?MarkPriceView = null,
     indexPriceFn: ?*const fn (types.InstrumentId) ?shared.types.Price = null,
+    assetOraclePriceFn: ?*const fn (types.AssetId) ?shared.types.Price = null,
     instrumentMaxLeverageFn: ?*const fn (types.InstrumentId) ?u8 = null,
     now_ms: i64 = 0,
     max_mark_price_age_ms: i64 = 15_000,
@@ -236,6 +232,15 @@ pub const GlobalState = struct {
             if (resolver(instrument_id)) |price| return price;
         }
         return self.freshMarkPrice(instrument_id) orelse self.markPrice(instrument_id);
+    }
+
+    pub fn assetOraclePrice(self: *const GlobalState, asset_id: types.AssetId) ?shared.types.Price {
+        if (self.assetOraclePriceFn) |resolver| {
+            if (resolver(asset_id)) |price| return price;
+        }
+
+        const instrument_id = std.math.cast(types.InstrumentId, asset_id) orelse return null;
+        return self.indexPrice(instrument_id);
     }
 
     pub fn referencePriceForTrade(self: *const GlobalState, instrument_id: types.InstrumentId) ?shared.types.Price {
@@ -286,6 +291,23 @@ fn transferMarginRequired(sub: *const account.SubAccount, state: *const GlobalSt
     }
 
     return @max(total_im, total_notional / 10);
+}
+
+fn buildCollateralBreakdown(sub: *const account.SubAccount, registry: types.CollateralRegistry) types.CollateralBreakdown {
+    var breakdown = types.CollateralBreakdown.init();
+
+    for (registry) |entry| {
+        const raw_amount = sub.collateral.rawBalance(entry.asset_id);
+        if (raw_amount == 0) continue;
+
+        breakdown.append(.{
+            .asset_id = entry.asset_id,
+            .raw_amount = raw_amount,
+            .effective_usdc = effectiveCollateralValue(entry.asset_id, raw_amount, registry),
+        }) catch unreachable;
+    }
+
+    return breakdown;
 }
 
 fn effectiveCollateralValue(asset_id: types.AssetId, amount: shared.types.Quantity, registry: types.CollateralRegistry) shared.types.Quantity {
@@ -371,6 +393,9 @@ test "cross - unrealized pnl immediately usable for new positions" {
     const summary = engine.computeUnified(sub, &state);
     try std.testing.expect(summary.total_equity > 0);
     try std.testing.expectEqual(types.AccountHealth.healthy, summary.health);
+    try std.testing.expectEqual(@as(usize, 1), summary.collateral_breakdown.slice().len);
+    try std.testing.expectEqual(types.USDC_ID, summary.collateral_breakdown.slice()[0].asset_id);
+    try std.testing.expectEqual(10_000 * types.USDC, summary.collateral_breakdown.slice()[0].effective_usdc);
 }
 
 test "transfer margin req - max(im, 10% notional)" {
@@ -576,4 +601,94 @@ test "transfer exceeds floor - rejected" {
         error.TransferWouldBreachMarginFloor,
         engine.checkTransferMargin(sub, types.USDC_ID, 10_000 * types.USDC, &state),
     );
+}
+
+test "portfolio margin ratio changes with oracle price" {
+    const alloc = std.testing.allocator;
+    const master_addr = [_]u8{0xAA} ** 20;
+    var master = account.MasterAccount.init(alloc, master_addr, 0);
+    defer master.deinit();
+
+    const sub = try master.openSubAccount(0, null, 0);
+    sub.master_mode = .portfolio_margin;
+    try sub.collateral.deposit(types.USDC_ID, 1_000_000 * types.USDC, &types.defaultCollateralRegistry);
+
+    const low_oracle_state = GlobalState{
+        .markPriceFn = struct {
+            fn mark(_: types.InstrumentId) ?shared.types.Price {
+                return null;
+            }
+        }.mark,
+        .assetOraclePriceFn = struct {
+            fn oracle(asset_id: types.AssetId) ?shared.types.Price {
+                return switch (asset_id) {
+                    types.USDC_ID => 1,
+                    else => null,
+                };
+            }
+        }.oracle,
+    };
+
+    const high_oracle_state = GlobalState{
+        .markPriceFn = low_oracle_state.markPriceFn,
+        .assetOraclePriceFn = struct {
+            fn oracle(asset_id: types.AssetId) ?shared.types.Price {
+                return switch (asset_id) {
+                    types.USDC_ID => 100_000,
+                    else => null,
+                };
+            }
+        }.oracle,
+    };
+
+    var engine = MarginEngine.init(.{});
+    const low_ratio = engine.computePortfolio(sub, &low_oracle_state).margin_ratio;
+    const high_ratio = engine.computePortfolio(sub, &high_oracle_state).margin_ratio;
+
+    try std.testing.expect(low_ratio > 0);
+    try std.testing.expect(low_ratio > high_ratio);
+}
+
+test "all margin modes expose collateral breakdown" {
+    const alloc = std.testing.allocator;
+    const master_addr = [_]u8{0xAB} ** 20;
+    var master = account.MasterAccount.init(alloc, master_addr, 0);
+    defer master.deinit();
+
+    const sub = try master.openSubAccount(0, null, 0);
+    try sub.collateral.deposit(types.USDC_ID, 1_000 * types.USDC, &types.defaultCollateralRegistry);
+    try sub.collateral.deposit(types.BTC_ID, 1 * types.BTC, &types.defaultCollateralRegistry);
+
+    const state = GlobalState{
+        .markPriceFn = struct {
+            fn mark(_: types.InstrumentId) ?shared.types.Price {
+                return null;
+            }
+        }.mark,
+        .assetOraclePriceFn = struct {
+            fn oracle(asset_id: types.AssetId) ?shared.types.Price {
+                return switch (asset_id) {
+                    types.USDC_ID => 1,
+                    types.BTC_ID => 50_000,
+                    else => null,
+                };
+            }
+        }.oracle,
+    };
+
+    var engine = MarginEngine.init(.{});
+
+    const standard = engine.computeStandard(sub, &state);
+    try std.testing.expectEqual(@as(usize, 2), standard.collateral_breakdown.slice().len);
+    try std.testing.expectEqual(types.USDC_ID, standard.collateral_breakdown.slice()[0].asset_id);
+    try std.testing.expectEqual(types.BTC_ID, standard.collateral_breakdown.slice()[1].asset_id);
+
+    const unified = engine.computeUnified(sub, &state);
+    try std.testing.expectEqual(@as(usize, 2), unified.collateral_breakdown.slice().len);
+    try std.testing.expectEqual(90000000, unified.collateral_breakdown.slice()[1].effective_usdc);
+
+    sub.master_mode = .portfolio_margin;
+    const portfolio = engine.computePortfolio(sub, &state);
+    try std.testing.expectEqual(@as(usize, 2), portfolio.collateral_breakdown.slice().len);
+    try std.testing.expectEqual(types.BTC_ID, portfolio.collateral_breakdown.slice()[1].asset_id);
 }

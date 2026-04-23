@@ -138,13 +138,12 @@ pub const PortfolioMargin = struct {
     pub fn portfolioMarginRatio(
         sub: *const account.SubAccount,
         state: *const margin_mod.GlobalState,
-        borrow_oracle_price_fn: *const fn (types.AssetId) shared.types.Price,
     ) f64 {
         var max_ratio: f64 = 0.0;
 
         for (types.BORROWABLE_ASSETS) |token| {
             const pmr = portfolioMaintenanceRequirement(sub, token, state);
-            const oracle_price = borrow_oracle_price_fn(token);
+            const oracle_price = state.assetOraclePrice(token) orelse continue;
             const ltv = getLTV(token);
             const plv = portfolioLiquidationValue(
                 sub,
@@ -215,11 +214,7 @@ test "portfolio margin ratio > 0.95 -> liquidatable" {
         .now_ms = 0,
     };
 
-    const ratio = PortfolioMargin.portfolioMarginRatio(sub, &state, struct {
-        fn getPrice(_: types.AssetId) shared.types.Price {
-            return 100_000;
-        }
-    }.getPrice);
+    const ratio = PortfolioMargin.portfolioMarginRatio(sub, &state);
 
     try std.testing.expect(ratio < 0.95); // Should be healthy with just USDC
 }

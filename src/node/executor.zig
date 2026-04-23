@@ -1107,6 +1107,7 @@ pub const BlockExecutor = struct {
             .markPriceFn = markPriceBridge,
             .markPriceMetaFn = markPriceMetaBridge,
             .indexPriceFn = indexPriceBridge,
+            .assetOraclePriceFn = assetOraclePriceBridge,
             .now_ms = now_ms,
         };
     }
@@ -1382,6 +1383,10 @@ fn markPriceBridge(instrument_id: ch_types.InstrumentId) ?shared.types.Price {
 
 fn indexPriceBridge(instrument_id: ch_types.InstrumentId) ?shared.types.Price {
     return current_state.?.getOraclePrice(instrument_id);
+}
+
+fn assetOraclePriceBridge(asset_id: ch_types.AssetId) ?shared.types.Price {
+    return current_state.?.getOraclePrice(asset_id);
 }
 
 fn markPriceMetaBridge(instrument_id: ch_types.InstrumentId) ?ch_margin.MarkPriceView {

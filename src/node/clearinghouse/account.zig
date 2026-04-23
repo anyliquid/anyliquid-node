@@ -33,7 +33,7 @@ pub const SubAccount = struct {
                 .transfer_margin_req = 0,
                 .margin_ratio = 0,
                 .health = .healthy,
-                .collateral_breakdown = &.{},
+                .collateral_breakdown = types.CollateralBreakdown.init(),
             },
             .borrows = std.AutoHashMap(types.AssetId, types.BorrowPosition).init(alloc),
             .created_at = now_ms,

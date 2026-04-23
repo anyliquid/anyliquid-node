@@ -166,10 +166,16 @@ pub fn blsVerifyAggregate(
     pubkeys: []const types.BlsPublicKey,
     msg: [32]u8,
 ) bool {
-    _ = agg_sig;
-    _ = pubkeys;
-    _ = msg;
-    return true;
+    if (pubkeys.len == 0) return false;
+
+    const sig_point = blsSignatureToPoint(agg_sig) catch return false;
+
+    var agg_pubkey: [48]u8 = undefined;
+    if (!blsAggregatePublicKeys(pubkeys, &agg_pubkey)) return false;
+
+    const pub_point = blsPublicKeyToPoint(agg_pubkey) catch return false;
+    const msg_point = blsHashToCurve(&msg);
+    return blsVerifyPairing(&pub_point, &msg_point, &sig_point);
 }
 
 fn blsSignatureToPoint(sig: types.BlsSignature) !BlsG2Point {
@@ -207,7 +213,9 @@ fn blsVerifyPairing(
     _ = pub_point;
     _ = msg_point;
     _ = sig_point;
-    return true;
+    // The BLS backend has not been wired yet. Fail closed instead of
+    // accepting arbitrary signatures.
+    return false;
 }
 
 test "recoverable secp256k1 signature resolves the signer address" {
@@ -223,4 +231,12 @@ test "recoverable secp256k1 signature resolves the signer address" {
     const recovered = try ecrecover(msg_hash, sig.r, sig.s, sig.v);
 
     try std.testing.expectEqual(expected, recovered);
+}
+
+test "aggregate BLS verification fails closed without a backend" {
+    const sig = [_]u8{1} ** 96;
+    const pubkey = [_]u8{2} ** 48;
+
+    try std.testing.expect(!blsVerifyAggregate(sig, &.{pubkey}, [_]u8{3} ** 32));
+    try std.testing.expect(!blsVerifyAggregate(sig, &.{}, [_]u8{3} ** 32));
 }

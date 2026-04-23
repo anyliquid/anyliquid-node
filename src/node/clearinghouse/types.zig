@@ -151,6 +151,8 @@ pub const BorrowPosition = struct {
     opened_at: i64,
 };
 
+pub const MAX_COLLATERAL_BREAKDOWN_ASSETS: usize = 16;
+
 pub const MarginSummary = struct {
     mode: AccountMode,
     total_equity: shared.types.SignedAmount,
@@ -160,7 +162,7 @@ pub const MarginSummary = struct {
     transfer_margin_req: shared.types.Quantity,
     margin_ratio: f64,
     health: AccountHealth,
-    collateral_breakdown: []AssetBalance,
+    collateral_breakdown: CollateralBreakdown,
 };
 
 pub const AccountHealth = enum {
@@ -173,6 +175,31 @@ pub const AssetBalance = struct {
     asset_id: AssetId,
     raw_amount: shared.types.Quantity,
     effective_usdc: shared.types.Quantity,
+};
+
+const zero_asset_balance = AssetBalance{
+    .asset_id = 0,
+    .raw_amount = 0,
+    .effective_usdc = 0,
+};
+
+pub const CollateralBreakdown = struct {
+    items: [MAX_COLLATERAL_BREAKDOWN_ASSETS]AssetBalance = [_]AssetBalance{zero_asset_balance} ** MAX_COLLATERAL_BREAKDOWN_ASSETS,
+    len: usize = 0,
+
+    pub fn init() CollateralBreakdown {
+        return .{};
+    }
+
+    pub fn append(self: *CollateralBreakdown, balance: AssetBalance) !void {
+        if (self.len >= self.items.len) return error.TooManyCollateralAssets;
+        self.items[self.len] = balance;
+        self.len += 1;
+    }
+
+    pub fn slice(self: *const CollateralBreakdown) []const AssetBalance {
+        return self.items[0..self.len];
+    }
 };
 
 pub const CollateralEntry = struct {

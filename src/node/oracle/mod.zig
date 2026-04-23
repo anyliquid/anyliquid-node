@@ -16,6 +16,7 @@ pub const OracleSubmission = struct {
 pub const ValidatorInfo = struct {
     address: shared.types.Address,
     weight: u64,
+    bls_pubkey: shared.types.BlsPublicKey = [_]u8{0} ** 48,
 };
 
 const PriceEntry = struct {
@@ -39,25 +40,30 @@ pub const ValidatorSet = struct {
     }
 
     pub fn getWeight(self: *const ValidatorSet, addr: shared.types.Address) u64 {
-        for (self.validators) |v| {
-            if (std.mem.eql(u8, v.address[0..], addr[0..])) {
-                return v.weight;
-            }
-        }
-        return 0;
+        const validator = self.getValidator(addr) orelse return 0;
+        return validator.weight;
     }
 
     pub fn hasValidator(self: *const ValidatorSet, addr: shared.types.Address) bool {
-        for (self.validators) |v| {
-            if (std.mem.eql(u8, v.address[0..], addr[0..])) {
-                return true;
-            }
-        }
-        return false;
+        return self.getValidator(addr) != null;
+    }
+
+    pub fn getPublicKey(self: *const ValidatorSet, addr: shared.types.Address) ?shared.types.BlsPublicKey {
+        const validator = self.getValidator(addr) orelse return null;
+        return validator.bls_pubkey;
     }
 
     pub fn twoThirdsWeight(self: *const ValidatorSet) u64 {
         return (self.total_weight * 2 + 2) / 3;
+    }
+
+    fn getValidator(self: *const ValidatorSet, addr: shared.types.Address) ?*const ValidatorInfo {
+        for (self.validators) |*validator| {
+            if (std.mem.eql(u8, validator.address[0..], addr[0..])) {
+                return validator;
+            }
+        }
+        return null;
     }
 };
 
@@ -66,6 +72,7 @@ pub const OracleConfig = struct {
     min_participants: usize = 2,
     max_age_ms: i64 = 5_000,
     now_ms_fn: ?*const fn () i64 = null,
+    verify_signature_fn: ?*const fn (shared.types.BlsAggregateSignature, []const shared.types.BlsPublicKey, [32]u8) bool = null,
 };
 
 pub const Oracle = struct {
@@ -105,7 +112,14 @@ pub const Oracle = struct {
             return error.InvalidValidator;
         }
 
-        if (shared.crypto.blsVerifyAggregate(sig, &.{}, [_]u8{0} ** 32) == false) {
+        const pubkey = self.validator_set.getPublicKey(from) orelse return error.InvalidValidatorConfig;
+        if (isZeroPublicKey(pubkey)) {
+            return error.InvalidValidatorConfig;
+        }
+
+        const message = hashSubmission(from, prices, timestamp);
+        const verify = self.config.verify_signature_fn orelse shared.crypto.blsVerifyAggregate;
+        if (!verify(sig, &.{pubkey}, message)) {
             return error.InvalidSignature;
         }
 
@@ -206,6 +220,53 @@ pub const Oracle = struct {
     }
 };
 
+fn hashSubmission(from: shared.types.Address, prices: []const AssetPrice, timestamp: i64) [32]u8 {
+    var hasher = std.crypto.hash.sha3.Keccak256.init(.{});
+    hasher.update("anyliquid-oracle-price-v1");
+    hasher.update(from[0..]);
+
+    var timestamp_bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &timestamp_bytes, @bitCast(timestamp), .big);
+    hasher.update(&timestamp_bytes);
+
+    var price_count_bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &price_count_bytes, prices.len, .big);
+    hasher.update(&price_count_bytes);
+
+    for (prices) |asset_price| {
+        var asset_id_bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &asset_id_bytes, asset_price.asset_id, .big);
+        hasher.update(&asset_id_bytes);
+
+        var price_bytes: [@sizeOf(shared.types.Price)]u8 = undefined;
+        std.mem.writeInt(shared.types.Price, &price_bytes, asset_price.price, .big);
+        hasher.update(&price_bytes);
+    }
+
+    var out: [32]u8 = undefined;
+    hasher.final(&out);
+    return out;
+}
+
+fn isZeroPublicKey(pubkey: shared.types.BlsPublicKey) bool {
+    for (pubkey) |byte| {
+        if (byte != 0) return false;
+    }
+    return true;
+}
+
+fn testPubkey(seed: u8) shared.types.BlsPublicKey {
+    return [_]u8{seed} ** 48;
+}
+
+fn allowConfiguredValidatorSignature(
+    _: shared.types.BlsAggregateSignature,
+    pubkeys: []const shared.types.BlsPublicKey,
+    _: [32]u8,
+) bool {
+    return pubkeys.len == 1 and !isZeroPublicKey(pubkeys[0]);
+}
+
 fn computeWeightedMedian(
     allocator: std.mem.Allocator,
     entries: []const PriceEntry,
@@ -277,15 +338,15 @@ fn isWithinDeviation(
 test "five validator submissions produce the median" {
     const alloc = std.testing.allocator;
     var validators = [_]ValidatorInfo{
-        .{ .address = [_]u8{1} ** 20, .weight = 1 },
-        .{ .address = [_]u8{2} ** 20, .weight = 1 },
-        .{ .address = [_]u8{3} ** 20, .weight = 1 },
-        .{ .address = [_]u8{4} ** 20, .weight = 1 },
-        .{ .address = [_]u8{5} ** 20, .weight = 1 },
+        .{ .address = [_]u8{1} ** 20, .weight = 1, .bls_pubkey = testPubkey(1) },
+        .{ .address = [_]u8{2} ** 20, .weight = 1, .bls_pubkey = testPubkey(2) },
+        .{ .address = [_]u8{3} ** 20, .weight = 1, .bls_pubkey = testPubkey(3) },
+        .{ .address = [_]u8{4} ** 20, .weight = 1, .bls_pubkey = testPubkey(4) },
+        .{ .address = [_]u8{5} ** 20, .weight = 1, .bls_pubkey = testPubkey(5) },
     };
     const vset = ValidatorSet.init(&validators);
 
-    var oracle = Oracle.init(vset, .{}, alloc);
+    var oracle = Oracle.init(vset, .{ .verify_signature_fn = allowConfiguredValidatorSignature }, alloc);
     defer oracle.deinit();
 
     const sig = [_]u8{0} ** 96;
@@ -305,15 +366,15 @@ test "five validator submissions produce the median" {
 test "outlier submission is filtered before the median" {
     const alloc = std.testing.allocator;
     var validators = [_]ValidatorInfo{
-        .{ .address = [_]u8{1} ** 20, .weight = 1 },
-        .{ .address = [_]u8{2} ** 20, .weight = 1 },
-        .{ .address = [_]u8{3} ** 20, .weight = 1 },
-        .{ .address = [_]u8{4} ** 20, .weight = 1 },
-        .{ .address = [_]u8{5} ** 20, .weight = 1 },
+        .{ .address = [_]u8{1} ** 20, .weight = 1, .bls_pubkey = testPubkey(1) },
+        .{ .address = [_]u8{2} ** 20, .weight = 1, .bls_pubkey = testPubkey(2) },
+        .{ .address = [_]u8{3} ** 20, .weight = 1, .bls_pubkey = testPubkey(3) },
+        .{ .address = [_]u8{4} ** 20, .weight = 1, .bls_pubkey = testPubkey(4) },
+        .{ .address = [_]u8{5} ** 20, .weight = 1, .bls_pubkey = testPubkey(5) },
     };
     const vset = ValidatorSet.init(&validators);
 
-    var oracle = Oracle.init(vset, .{}, alloc);
+    var oracle = Oracle.init(vset, .{ .verify_signature_fn = allowConfiguredValidatorSignature }, alloc);
     defer oracle.deinit();
 
     const sig = [_]u8{0} ** 96;
@@ -333,9 +394,9 @@ test "outlier submission is filtered before the median" {
 test "stale submissions are excluded from aggregation" {
     const alloc = std.testing.allocator;
     var validators = [_]ValidatorInfo{
-        .{ .address = [_]u8{1} ** 20, .weight = 1 },
-        .{ .address = [_]u8{2} ** 20, .weight = 1 },
-        .{ .address = [_]u8{3} ** 20, .weight = 1 },
+        .{ .address = [_]u8{1} ** 20, .weight = 1, .bls_pubkey = testPubkey(1) },
+        .{ .address = [_]u8{2} ** 20, .weight = 1, .bls_pubkey = testPubkey(2) },
+        .{ .address = [_]u8{3} ** 20, .weight = 1, .bls_pubkey = testPubkey(3) },
     };
     const vset = ValidatorSet.init(&validators);
 
@@ -347,6 +408,7 @@ test "stale submissions are excluded from aggregation" {
                 return 1_700_000_000_000;
             }
         }.now,
+        .verify_signature_fn = allowConfiguredValidatorSignature,
     }, alloc);
     defer oracle.deinit();
 
@@ -359,4 +421,46 @@ test "stale submissions are excluded from aggregation" {
     defer alloc.free(result);
 
     try std.testing.expect(result[0].price >= 50100);
+}
+
+test "submission is rejected when validator BLS pubkey is missing" {
+    const alloc = std.testing.allocator;
+    var validators = [_]ValidatorInfo{
+        .{ .address = [_]u8{1} ** 20, .weight = 1 },
+    };
+    const vset = ValidatorSet.init(&validators);
+
+    var oracle = Oracle.init(vset, .{ .verify_signature_fn = allowConfiguredValidatorSignature }, alloc);
+    defer oracle.deinit();
+
+    try std.testing.expectError(
+        error.InvalidValidatorConfig,
+        oracle.submitPrices(validators[0].address, &.{.{ .asset_id = 0, .price = 50_000 }}, [_]u8{7} ** 96, 0),
+    );
+}
+
+test "submission is rejected when signature verifier rejects it" {
+    const alloc = std.testing.allocator;
+    var validators = [_]ValidatorInfo{
+        .{ .address = [_]u8{1} ** 20, .weight = 1, .bls_pubkey = testPubkey(1) },
+    };
+    const vset = ValidatorSet.init(&validators);
+
+    var oracle = Oracle.init(vset, .{
+        .verify_signature_fn = struct {
+            fn reject(
+                _: shared.types.BlsAggregateSignature,
+                _: []const shared.types.BlsPublicKey,
+                _: [32]u8,
+            ) bool {
+                return false;
+            }
+        }.reject,
+    }, alloc);
+    defer oracle.deinit();
+
+    try std.testing.expectError(
+        error.InvalidSignature,
+        oracle.submitPrices(validators[0].address, &.{.{ .asset_id = 0, .price = 50_000 }}, [_]u8{7} ** 96, 0),
+    );
 }
