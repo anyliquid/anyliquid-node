@@ -76,8 +76,8 @@ pub const App = struct {
     pub fn writeOverview(self: *App, writer: anytype) !void {
         _ = self;
         try writer.print(
-            "AnyLiquid Node scaffold\nzig: {s}\nthroughput target: {s}\n",
-            .{ "0.15.2", "1,000,000 TPS" },
+            "AnyLiquid Node scaffold\nzig: {s}\nthroughput target: {s}\nexecution path: {s}\n",
+            .{ "0.15.2", "1,000,000 TPS", "clearinghouse-first" },
         );
     }
 };
@@ -127,4 +127,6 @@ test {
     _ = @import("node/store/mod.zig");
     _ = @import("node/consensus/mod.zig");
     _ = @import("node/oracle/mod.zig");
+    _ = @import("node/executor.zig");
+    _ = @import("node/order_core_queue.zig");
 }

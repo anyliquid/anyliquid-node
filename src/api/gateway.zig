@@ -1,8 +1,10 @@
 const std = @import("std");
 const shared = @import("../shared/mod.zig");
 const mempool_mod = @import("../node/mempool.zig");
+const order_core_queue_mod = @import("../node/order_core_queue.zig");
 const state_mod = @import("../node/state.zig");
 const store_mod = @import("../node/store/mod.zig");
+const executor_mod = @import("../node/executor.zig");
 
 pub const GatewayError = error{
     InvalidResponse,
@@ -390,8 +392,9 @@ pub const InMemoryNodeHarness = struct {
     state: *state_mod.GlobalState,
     mempool: *mempool_mod.Mempool,
     store: *store_mod.Store,
+    order_core_queue: order_core_queue_mod.OrderCoreQueue,
+    executor: executor_mod.BlockExecutor,
     queued_events: std.ArrayList(shared.protocol.NodeEvent),
-    next_order_id: u64 = 1,
 
     pub fn init(
         state: *state_mod.GlobalState,
@@ -404,6 +407,8 @@ pub const InMemoryNodeHarness = struct {
             .state = state,
             .mempool = mempool,
             .store = store,
+            .order_core_queue = order_core_queue_mod.OrderCoreQueue.init(.{}, allocator),
+            .executor = executor_mod.BlockExecutor.init(state, allocator) catch @panic("failed to init BlockExecutor"),
             .queued_events = .empty,
         };
     }
@@ -413,6 +418,8 @@ pub const InMemoryNodeHarness = struct {
             shared.serialization.deinitNodeEvent(self.allocator, event);
         }
         self.queued_events.deinit(self.allocator);
+        self.order_core_queue.deinit();
+        self.executor.deinit();
     }
 
     pub fn transport(self: *InMemoryNodeHarness) Transport {
@@ -421,6 +428,15 @@ pub const InMemoryNodeHarness = struct {
             .round_trip_fn = roundTrip,
             .pump_fn = pump,
         };
+    }
+
+    pub fn creditCollateral(
+        self: *InMemoryNodeHarness,
+        user: shared.types.Address,
+        asset_id: u64,
+        amount: shared.types.Quantity,
+    ) !void {
+        try self.executor.creditCollateral(user, asset_id, amount);
     }
 
     fn roundTrip(ctx: ?*anyopaque, frame_bytes: []const u8, allocator: std.mem.Allocator) anyerror![]u8 {
@@ -440,8 +456,10 @@ pub const InMemoryNodeHarness = struct {
             },
             .query_req => {
                 const query = try shared.serialization.decodeQueryRequest(allocator, frame.payload);
-                const response = try self.handleQuery(query);
+                var response = try self.handleQuery(query, allocator);
+                defer deinitQueryResponseLocal(allocator, &response);
                 const payload = try shared.serialization.encodeQueryResponse(allocator, response);
+                defer allocator.free(payload);
                 return try shared.serialization.encodeFrame(allocator, frame.header.msg_id, .query_resp, payload);
             },
             else => return error.UnsupportedMessageType,
@@ -470,55 +488,60 @@ pub const InMemoryNodeHarness = struct {
             .signature = req.signature,
             .user = req.user,
         };
-        try self.mempool.add(tx);
-
-        const order_id = self.next_order_id;
-        self.next_order_id += 1;
-        try self.queueUserUpdate(req.user, order_id);
-        return .{
-            .status = .resting,
-            .order_id = order_id,
-            .error_msg = null,
+        const receipts = if (order_core_queue_mod.isOrderCoreAction(tx.action)) blk: {
+            try self.order_core_queue.enqueue(tx);
+            break :blk try self.executor.executeOrderCoreBlock(&self.order_core_queue, self.store, &self.queued_events);
+        } else blk: {
+            try self.mempool.add(tx);
+            break :blk try self.executor.executePendingBlock(self.mempool, self.store, &self.queued_events);
         };
+        defer executor_mod.deinitExecutionReceipts(self.allocator, receipts);
+
+        for (receipts) |receipt| {
+            if (std.mem.eql(u8, receipt.user[0..], req.user[0..]) and receipt.nonce == req.nonce) {
+                return .{
+                    .status = receipt.ack.status,
+                    .order_id = receipt.ack.order_id,
+                    .error_msg = if (receipt.ack.error_msg) |msg| try self.allocator.dupe(u8, msg) else null,
+                };
+            }
+        }
+
+        return error.MissingExecutionReceipt;
     }
 
-    fn handleQuery(_: *InMemoryNodeHarness, query: shared.protocol.QueryRequest) !shared.protocol.QueryResponse {
+    fn handleQuery(self: *InMemoryNodeHarness, query: shared.protocol.QueryRequest, allocator: std.mem.Allocator) !shared.protocol.QueryResponse {
         return switch (query) {
-            .user_state => |addr| .{ .user_state = .{
+            .user_state => |addr| .{ .user_state = self.executor.queryUserState(allocator, addr) catch .{
                 .address = addr,
                 .balance = 0,
                 .positions = &.{},
                 .open_orders = &.{},
                 .api_wallet = null,
             } },
-            .open_orders => .{ .open_orders = &.{} },
-            .l2_book => |params| .{ .l2_book = .{
+            .open_orders => |addr| .{ .open_orders = self.executor.queryOpenOrders(allocator, addr) catch &.{} },
+            .l2_book => |params| .{ .l2_book = self.executor.queryL2Book(allocator, params.asset_id, params.depth) catch .{
                 .asset_id = params.asset_id,
                 .seq = 0,
                 .bids = &.{},
                 .asks = &.{},
                 .is_snapshot = true,
             } },
-            .all_mids => .{ .all_mids = .{} },
+            .all_mids => .{ .all_mids = try self.executor.queryAllMids(allocator) },
         };
-    }
-
-    fn queueUserUpdate(self: *InMemoryNodeHarness, user: shared.types.Address, order_id: u64) !void {
-        const open_orders = try self.allocator.alloc(u64, 1);
-        open_orders[0] = order_id;
-        const account = shared.types.AccountState{
-            .address = user,
-            .balance = 0,
-            .positions = &.{},
-            .open_orders = open_orders,
-            .api_wallet = null,
-        };
-        errdefer self.allocator.free(open_orders);
-
-        try self.queued_events.append(self.allocator, .{ .user_update = account });
-        self.state.bumpBlock();
     }
 };
+
+fn deinitQueryResponseLocal(allocator: std.mem.Allocator, response: *shared.protocol.QueryResponse) void {
+    switch (response.*) {
+        .user_state => |*account| shared.serialization.deinitAccountState(allocator, account),
+        .open_orders => |orders| if (orders.len > 0) allocator.free(orders),
+        .l2_book => |*snapshot| shared.serialization.deinitL2Snapshot(allocator, snapshot),
+        .all_mids => |*all_mids| all_mids.deinit(allocator),
+        else => {},
+    }
+    response.* = undefined;
+}
 
 fn frameTypeForEvent(event: shared.protocol.NodeEvent) shared.protocol.MsgType {
     return switch (event) {

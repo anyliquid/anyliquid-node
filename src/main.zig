@@ -9,8 +9,9 @@ pub fn main() !void {
     defer app.deinit();
     try app.connect();
 
-    std.debug.print("AnyLiquid Node scaffold\nzig: {s}\nthroughput target: {s}\n", .{
+    std.debug.print("AnyLiquid Node scaffold\nzig: {s}\nthroughput target: {s}\nexecution path: {s}\n", .{
         "0.15.2",
         "1,000,000 TPS",
+        "clearinghouse-first",
     });
 }

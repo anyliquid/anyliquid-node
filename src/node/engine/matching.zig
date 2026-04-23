@@ -173,6 +173,86 @@ pub const MatchingEngine = struct {
         return error.OrderNotFound;
     }
 
+    pub fn batchCancel(
+        self: *MatchingEngine,
+        user: shared.types.Address,
+        req: shared.types.BatchCancelRequest,
+        state: *state_mod.GlobalState,
+    ) MatchingError!usize {
+        var touched_assets = std.AutoHashMap(shared.types.AssetId, void).init(self.allocator);
+        defer touched_assets.deinit();
+
+        var cancelled: usize = 0;
+        for (req.order_ids) |order_id| {
+            const asset_id = self.order_asset.get(order_id) orelse continue;
+            const book = self.books.getPtr(asset_id) orelse continue;
+            const record = book.orders.get(order_id) orelse continue;
+            if (!std.mem.eql(u8, record.order.user[0..], user[0..])) continue;
+
+            try self.removeOrder(book, order_id);
+            cancelled += 1;
+            try touched_assets.put(asset_id, {});
+        }
+
+        try self.publishTouchedBooks(&touched_assets, state);
+        return cancelled;
+    }
+
+    pub fn cancelAll(
+        self: *MatchingEngine,
+        user: shared.types.Address,
+        req: shared.types.CancelAllRequest,
+        state: *state_mod.GlobalState,
+    ) MatchingError!usize {
+        var touched_assets = std.AutoHashMap(shared.types.AssetId, void).init(self.allocator);
+        defer touched_assets.deinit();
+
+        var cancelled: usize = 0;
+        var books_it = self.books.iterator();
+        while (books_it.next()) |entry| {
+            const asset_id = entry.key_ptr.*;
+            if (req.asset_id) |filter_asset_id| {
+                if (filter_asset_id != asset_id) continue;
+            }
+
+            const book = entry.value_ptr;
+            var to_remove = std.ArrayList(u64).empty;
+            defer to_remove.deinit(self.allocator);
+
+            for (book.bids.items) |order_id| {
+                const record = book.orders.get(order_id) orelse continue;
+                if (std.mem.eql(u8, record.order.user[0..], user[0..])) {
+                    try to_remove.append(self.allocator, order_id);
+                }
+            }
+            for (book.asks.items) |order_id| {
+                const record = book.orders.get(order_id) orelse continue;
+                if (std.mem.eql(u8, record.order.user[0..], user[0..])) {
+                    try to_remove.append(self.allocator, order_id);
+                }
+            }
+            if (req.include_triggers) {
+                for (book.triggers.items) |order_id| {
+                    const record = book.orders.get(order_id) orelse continue;
+                    if (std.mem.eql(u8, record.order.user[0..], user[0..])) {
+                        try to_remove.append(self.allocator, order_id);
+                    }
+                }
+            }
+
+            for (to_remove.items) |order_id| {
+                try self.removeOrder(book, order_id);
+                cancelled += 1;
+            }
+            if (to_remove.items.len > 0) {
+                try touched_assets.put(asset_id, {});
+            }
+        }
+
+        try self.publishTouchedBooks(&touched_assets, state);
+        return cancelled;
+    }
+
     pub fn checkTriggers(
         self: *MatchingEngine,
         asset_id: shared.types.AssetId,
@@ -346,6 +426,18 @@ pub const MatchingEngine = struct {
         self.next_seq += 1;
         book.seq += 1;
         return seq;
+    }
+
+    fn publishTouchedBooks(
+        self: *MatchingEngine,
+        touched_assets: *const std.AutoHashMap(shared.types.AssetId, void),
+        state: *state_mod.GlobalState,
+    ) MatchingError!void {
+        var it = touched_assets.iterator();
+        while (it.next()) |entry| {
+            const book = self.books.getPtr(entry.key_ptr.*) orelse continue;
+            self.risk.onBookUpdate(entry.key_ptr.*, bestBid(book), bestAsk(book), state);
+        }
     }
 };
 

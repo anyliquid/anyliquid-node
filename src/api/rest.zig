@@ -295,6 +295,12 @@ fn parseActionPayload(allocator: std.mem.Allocator, action_type: []const u8, jso
             .grouping = .none,
         } };
     }
+    if (std.mem.eql(u8, action_type, "cancelAll")) {
+        return .{ .cancel_all = .{} };
+    }
+    if (std.mem.eql(u8, action_type, "batchCancel")) {
+        return .{ .batch_cancel = .{ .order_ids = &.{} } };
+    }
     return .{ .order = .{
         .type = action_type,
         .orders = &.{},

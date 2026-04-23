@@ -196,6 +196,8 @@ pub const LiquidationResult = struct {
     insurance_fund_delta: shared.types.SignedAmount,
     adl_triggered: bool,
     adl_shortfall: shared.types.Quantity,
+    partially_reduced: bool = false,
+    reduced_notional: shared.types.Quantity = 0,
 };
 
 pub const AdlResult = struct {

@@ -154,7 +154,7 @@ pub const MarginEngine = struct {
         const max_leverage = state.instrumentMaxLeverage(instrument_id, self.cfg.default_max_leverage);
         try validateRequestedLeverage(order.leverage, max_leverage);
 
-        const mark_px = state.markPrice(instrument_id) orelse if (order.price > 0)
+        const mark_px = state.referencePriceForTrade(instrument_id) orelse if (order.price > 0)
             order.price
         else
             return error.MarkPriceUnavailable;
@@ -195,11 +195,59 @@ pub const MarginEngine = struct {
 
 pub const GlobalState = struct {
     markPriceFn: *const fn (types.InstrumentId) ?shared.types.Price,
+    markPriceMetaFn: ?*const fn (types.InstrumentId) ?MarkPriceView = null,
+    indexPriceFn: ?*const fn (types.InstrumentId) ?shared.types.Price = null,
     instrumentMaxLeverageFn: ?*const fn (types.InstrumentId) ?u8 = null,
     now_ms: i64 = 0,
+    max_mark_price_age_ms: i64 = 15_000,
+    max_trade_price_deviation_bps: u32 = 500,
+    funding_interest_bps: u32 = 1,
+    funding_rate_cap_bps: u32 = 5,
+    default_funding_interval_ms: u64 = 3_600_000,
 
     pub fn markPrice(self: *const GlobalState, instrument_id: types.InstrumentId) ?shared.types.Price {
+        if (self.markPriceMetaFn) |resolver| {
+            if (resolver(instrument_id)) |view| return view.price;
+        }
         return self.markPriceFn(instrument_id);
+    }
+
+    pub fn markPriceView(self: *const GlobalState, instrument_id: types.InstrumentId) ?MarkPriceView {
+        if (self.markPriceMetaFn) |resolver| {
+            return resolver(instrument_id);
+        }
+        if (self.markPriceFn(instrument_id)) |price| {
+            return .{
+                .price = price,
+                .updated_at_ms = self.now_ms,
+            };
+        }
+        return null;
+    }
+
+    pub fn freshMarkPrice(self: *const GlobalState, instrument_id: types.InstrumentId) ?shared.types.Price {
+        const view = self.markPriceView(instrument_id) orelse return null;
+        if (self.now_ms - view.updated_at_ms > self.max_mark_price_age_ms) return null;
+        return view.price;
+    }
+
+    pub fn indexPrice(self: *const GlobalState, instrument_id: types.InstrumentId) ?shared.types.Price {
+        if (self.indexPriceFn) |resolver| {
+            if (resolver(instrument_id)) |price| return price;
+        }
+        return self.freshMarkPrice(instrument_id) orelse self.markPrice(instrument_id);
+    }
+
+    pub fn referencePriceForTrade(self: *const GlobalState, instrument_id: types.InstrumentId) ?shared.types.Price {
+        return self.freshMarkPrice(instrument_id) orelse self.indexPrice(instrument_id);
+    }
+
+    pub fn isWithinTradeBand(self: *const GlobalState, reference_price: shared.types.Price, trade_price: shared.types.Price) bool {
+        if (reference_price == 0) return true;
+        const lower_delta: shared.types.Price = @as(shared.types.Price, @intCast((@as(u512, reference_price) * self.max_trade_price_deviation_bps) / 10_000));
+        const upper = reference_price + lower_delta;
+        const lower = if (reference_price > lower_delta) reference_price - lower_delta else 0;
+        return trade_price >= lower and trade_price <= upper;
     }
 
     pub fn instrumentMaxLeverage(self: *const GlobalState, instrument_id: types.InstrumentId, fallback: u8) u8 {
@@ -208,6 +256,19 @@ pub const GlobalState = struct {
         }
         return fallback;
     }
+
+    pub fn fundingInterestRate(self: *const GlobalState) f64 {
+        return @as(f64, @floatFromInt(self.funding_interest_bps)) / 10_000.0;
+    }
+
+    pub fn fundingRateCap(self: *const GlobalState) f64 {
+        return @as(f64, @floatFromInt(self.funding_rate_cap_bps)) / 10_000.0;
+    }
+};
+
+pub const MarkPriceView = struct {
+    price: shared.types.Price,
+    updated_at_ms: i64,
 };
 
 fn transferMarginRequired(sub: *const account.SubAccount, state: *const GlobalState) shared.types.Quantity {

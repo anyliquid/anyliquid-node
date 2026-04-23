@@ -4,6 +4,11 @@ The Node layer is the core state machine of the system. It runs as a single auth
 
 The repository-wide documentation contract is defined in [`../harness-driven-documentation.md`](../harness-driven-documentation.md).
 
+Execution note: account mutation, margining, liquidation, funding settlement,
+and collateral accounting are now clearinghouse-first concerns. The standalone
+`Matching Engine` / `Risk Engine` / `Perp Engine` documents below should be read
+as legacy prototypes unless a document explicitly says otherwise.
+
 ```text
 ┌─────────────────────────────────────────────────────────────┐
 │                        Node Process                        │
@@ -16,9 +21,9 @@ The repository-wide documentation contract is defined in [`../harness-driven-doc
 │  ┌──────────────────────────▼────────────────────────────┐  │
 │  │                 Execution Pipeline                    │  │
 │  │                                                       │  │
-│  │ Mempool -> Block Proposal -> Matching Engine          │  │
-│  │                               -> Risk Engine          │  │
-│  │                               -> Perp Engine          │  │
+    │  │ Mempool -> Block Proposal -> Matching Engine          │  │
+    │  │                               -> Clearinghouse        │  │
+    │  │                               -> Oracle / Timers      │  │
 │  └──────────────────────────┬────────────────────────────┘  │
 │                             │                               │
 │         ┌───────────────────┼───────────────────┐           │
@@ -61,9 +66,10 @@ The implementation target is `Zig 0.15.2`. Performance-oriented design decisions
 | Module | Document | Responsibility |
 | --- | --- | --- |
 | IPC Server | [`ipc-server.md`](ipc-server.md) | receive API actions and queries, push Node events |
-| Matching Engine | [`matching-engine.md`](matching-engine.md) | maintain books and produce fills |
-| Risk Engine | [`risk-engine.md`](risk-engine.md) | margin checks, liquidation, ADL |
-| Perp Engine | [`perp-engine.md`](perp-engine.md) | funding, mark prices, unrealized PnL |
+| Clearinghouse | [`../impovement/Cleanhouse.md`](../impovement/Cleanhouse.md) | canonical account mutation, margin, liquidation, funding, collateral |
+| Matching Engine | [`matching-engine.md`](matching-engine.md) | legacy order-book prototype; maintain books and produce fills |
+| Risk Engine | [`risk-engine.md`](risk-engine.md) | legacy margin prototype |
+| Perp Engine | [`perp-engine.md`](perp-engine.md) | legacy perp prototype |
 | Oracle Aggregator | [`oracle-aggregator.md`](oracle-aggregator.md) | aggregate external prices |
 | Consensus | [`consensus-hyperbft.md`](consensus-hyperbft.md) | HyperBFT voting and finality |
 | P2P Network | [`p2p-network.md`](p2p-network.md) | gossip, peer communication, block sync |

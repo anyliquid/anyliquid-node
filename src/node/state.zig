@@ -38,6 +38,10 @@ pub const GlobalState = struct {
         }
         self.funding_history.deinit();
         self.oracle_prices.deinit();
+        var accounts_it = self.accounts.iterator();
+        while (accounts_it.next()) |entry| {
+            entry.value_ptr.deinit();
+        }
         self.accounts.deinit();
         self.risk_engine.deinit();
         self.perp_engine.deinit();

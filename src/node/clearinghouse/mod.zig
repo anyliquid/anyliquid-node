@@ -89,7 +89,7 @@ pub const Clearinghouse = struct {
         sub: *account_mod.SubAccount,
         state: *const margin_mod.GlobalState,
     ) !types.LiquidationResult {
-        return self.liquidation_engine.execute(candidate, sub, state);
+        return self.liquidation_engine.execute(candidate, sub, &self.margin_engine, state);
     }
 
     /// Execute intra-master transfer.

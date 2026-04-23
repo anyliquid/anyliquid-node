@@ -83,8 +83,17 @@ pub const CancelRequest = struct {
     order_id: u64,
 };
 
+pub const BatchCancelRequest = struct {
+    order_ids: []const u64,
+};
+
 pub const CancelByCloidRequest = struct {
     cloid: [16]u8,
+};
+
+pub const CancelAllRequest = struct {
+    asset_id: ?AssetId = null,
+    include_triggers: bool = true,
 };
 
 pub const UpdateLeverageRequest = struct {
@@ -134,7 +143,9 @@ pub const Order = struct {
 pub const ActionPayload = union(enum) {
     order: OrderAction,
     cancel: CancelRequest,
+    batch_cancel: BatchCancelRequest,
     cancel_by_cloid: CancelByCloidRequest,
+    cancel_all: CancelAllRequest,
     batch_orders: []const OrderAction,
     update_leverage: UpdateLeverageRequest,
     update_isolated_margin: UpdateMarginRequest,

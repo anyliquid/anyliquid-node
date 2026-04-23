@@ -1,6 +1,8 @@
 # Node Layer Index
 
-The Node layer is the authoritative state machine. It owns matching, risk checks, oracle aggregation, storage, consensus, and event emission back toward the API layer.
+The Node layer is the authoritative state machine. The primary execution path is
+`clearinghouse`; the older `matching` / `risk` / `perp` engine documents remain
+available as legacy prototypes and harness references.
 
 ## Documents
 
@@ -18,12 +20,13 @@ The Node layer is the authoritative state machine. It owns matching, risk checks
 ## Reading Order
 
 1. [`overview.md`](overview.md)
-2. [`matching-engine.md`](matching-engine.md)
-3. [`risk-engine.md`](risk-engine.md)
-4. [`perp-engine.md`](perp-engine.md)
-5. [`oracle-aggregator.md`](oracle-aggregator.md)
-6. [`mempool.md`](mempool.md)
-7. [`store.md`](store.md)
-8. [`ipc-server.md`](ipc-server.md)
-9. [`p2p-network.md`](p2p-network.md)
-10. [`consensus-hyperbft.md`](consensus-hyperbft.md)
+2. [`../impovement/Cleanhouse.md`](../impovement/Cleanhouse.md)
+3. [`oracle-aggregator.md`](oracle-aggregator.md)
+4. [`mempool.md`](mempool.md)
+5. [`store.md`](store.md)
+6. [`ipc-server.md`](ipc-server.md)
+7. [`p2p-network.md`](p2p-network.md)
+8. [`consensus-hyperbft.md`](consensus-hyperbft.md)
+9. [`matching-engine.md`](matching-engine.md) (legacy order-book prototype)
+10. [`risk-engine.md`](risk-engine.md) (legacy margin prototype)
+11. [`perp-engine.md`](perp-engine.md) (legacy perp prototype)

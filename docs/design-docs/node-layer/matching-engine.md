@@ -1,5 +1,8 @@
 # Module: Matching Engine
 
+Status: legacy order-book prototype retained for harness coverage and isolated
+matching tests. Canonical account mutation now lives in the clearinghouse path.
+
 **File:** `src/node/engine/matching.zig`  
 **Depends on:** `shared/types`, `store` (read-only), `risk` (pre-fill hook)
 
@@ -31,6 +34,8 @@ pub const MatchingEngine = struct {
     pub fn placeOrder(self: *MatchingEngine, order: Order, state: *GlobalState) ![]Fill
     pub fn cancelOrder(self: *MatchingEngine, cancel: CancelRequest, state: *GlobalState) !void
     pub fn cancelByCloid(self: *MatchingEngine, req: CancelByCloidRequest, state: *GlobalState) !void
+    pub fn batchCancel(self: *MatchingEngine, user: Address, req: BatchCancelRequest, state: *GlobalState) !usize
+    pub fn cancelAll(self: *MatchingEngine, user: Address, req: CancelAllRequest, state: *GlobalState) !usize
     pub fn checkTriggers(self: *MatchingEngine, asset_id: AssetId, price: Price, state: *GlobalState) ![]Fill
     pub fn getL2Snapshot(self: *MatchingEngine, asset_id: AssetId, depth: u32) !L2Snapshot
 };

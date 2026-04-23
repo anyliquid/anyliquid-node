@@ -2,7 +2,9 @@ const std = @import("std");
 const shared = @import("../shared/mod.zig");
 const state_mod = @import("state.zig");
 const mempool_mod = @import("mempool.zig");
+const order_core_queue_mod = @import("order_core_queue.zig");
 const store_mod = @import("store/mod.zig");
+const executor_mod = @import("executor.zig");
 
 pub const IpcConfig = struct {
     socket_path: []const u8 = "/tmp/anyliquid-node.sock",
@@ -28,9 +30,11 @@ pub const IpcServer = struct {
     state: *state_mod.GlobalState,
     mempool: *mempool_mod.Mempool,
     store: *store_mod.Store,
+    order_core_queue: order_core_queue_mod.OrderCoreQueue,
+    executor: executor_mod.BlockExecutor,
     server_socket: ?std.posix.socket_t = null,
     clients: std.ArrayList(IpcClient),
-    event_buf: std.ArrayList(u8),
+    event_buf: std.ArrayList(shared.protocol.NodeEvent),
     running: bool = false,
 
     pub fn init(
@@ -46,6 +50,8 @@ pub const IpcServer = struct {
             .state = state,
             .mempool = mempool,
             .store = store,
+            .order_core_queue = order_core_queue_mod.OrderCoreQueue.init(.{}, allocator),
+            .executor = try executor_mod.BlockExecutor.init(state, allocator),
             .clients = .empty,
             .event_buf = .empty,
         };
@@ -61,7 +67,12 @@ pub const IpcServer = struct {
             }
         }
         self.clients.deinit(self.allocator);
+        for (self.event_buf.items) |*event| {
+            shared.serialization.deinitNodeEvent(self.allocator, event);
+        }
         self.event_buf.deinit(self.allocator);
+        self.order_core_queue.deinit();
+        self.executor.deinit();
         if (self.server_socket) |sock| {
             std.posix.close(sock);
         }
@@ -220,18 +231,38 @@ pub const IpcServer = struct {
                     .signature = req.signature,
                     .user = req.user,
                 };
-                try self.mempool.add(tx);
-
-                const ack = shared.protocol.ActionAck{
-                    .status = .resting,
-                    .order_id = null,
-                    .error_msg = null,
+                const receipts = if (order_core_queue_mod.isOrderCoreAction(tx.action)) blk: {
+                    try self.order_core_queue.enqueue(tx);
+                    break :blk try self.executor.executeOrderCoreBlock(&self.order_core_queue, self.store, &self.event_buf);
+                } else blk: {
+                    try self.mempool.add(tx);
+                    break :blk try self.executor.executePendingBlock(self.mempool, self.store, &self.event_buf);
                 };
+                defer executor_mod.deinitExecutionReceipts(self.allocator, receipts);
+
+                var ack = shared.protocol.ActionAck{
+                    .status = .rejected,
+                    .order_id = null,
+                    .error_msg = try self.allocator.dupe(u8, "MissingExecutionReceipt"),
+                };
+                defer shared.serialization.deinitActionAck(self.allocator, &ack);
+                for (receipts) |receipt| {
+                    if (std.mem.eql(u8, receipt.user[0..], req.user[0..]) and receipt.nonce == req.nonce) {
+                        ack = .{
+                            .status = receipt.ack.status,
+                            .order_id = receipt.ack.order_id,
+                            .error_msg = if (receipt.ack.error_msg) |msg| try self.allocator.dupe(u8, msg) else null,
+                        };
+                        break;
+                    }
+                }
                 try self.sendAck(client, frame.header.msg_id, ack);
+                self.broadcastQueuedEvents();
             },
             .query_req => {
                 const query = try shared.serialization.decodeQueryRequest(self.allocator, frame.payload);
-                const response = try self.handleQuery(query);
+                var response = try self.handleQuery(query);
+                defer deinitQueryResponseLocal(self.allocator, &response);
                 try self.sendQueryResponse(client, frame.header.msg_id, response);
             },
             else => return error.UnsupportedMessageType,
@@ -241,17 +272,7 @@ pub const IpcServer = struct {
     fn handleQuery(self: *IpcServer, query: shared.protocol.QueryRequest) !shared.protocol.QueryResponse {
         return switch (query) {
             .user_state => |addr| {
-                const account = self.state.getAccount(addr);
-                if (account) |acc| {
-                    return .{ .user_state = shared.types.AccountState{
-                        .address = acc.address,
-                        .balance = acc.balance,
-                        .positions = &.{},
-                        .open_orders = &.{},
-                        .api_wallet = acc.api_wallet,
-                    } };
-                }
-                return .{ .user_state = shared.types.AccountState{
+                return .{ .user_state = self.executor.queryUserState(self.allocator, addr) catch .{
                     .address = addr,
                     .balance = 0,
                     .positions = &.{},
@@ -260,19 +281,16 @@ pub const IpcServer = struct {
                 } };
             },
             .open_orders => |addr| {
-                _ = addr;
-                return .{ .open_orders = &.{} };
+                return .{ .open_orders = self.executor.queryOpenOrders(self.allocator, addr) catch &.{} };
             },
-            .l2_book => |params| .{ .l2_book = shared.types.L2Snapshot{
+            .l2_book => |params| .{ .l2_book = self.executor.queryL2Book(self.allocator, params.asset_id, params.depth) catch .{
                 .asset_id = params.asset_id,
                 .seq = 0,
                 .bids = &.{},
                 .asks = &.{},
                 .is_snapshot = true,
             } },
-            .all_mids => {
-                return .{ .all_mids = shared.types.AllMidsUpdate{} };
-            },
+            .all_mids => .{ .all_mids = try self.executor.queryAllMids(self.allocator) },
         };
     }
 
@@ -302,7 +320,26 @@ pub const IpcServer = struct {
         };
         client.send_buf.replaceRange(self.allocator, 0, written, &.{}) catch {};
     }
+
+    fn broadcastQueuedEvents(self: *IpcServer) void {
+        while (self.event_buf.items.len > 0) {
+            var event = self.event_buf.orderedRemove(0);
+            defer shared.serialization.deinitNodeEvent(self.allocator, &event);
+            self.broadcastEvents(&.{event});
+        }
+    }
 };
+
+fn deinitQueryResponseLocal(allocator: std.mem.Allocator, response: *shared.protocol.QueryResponse) void {
+    switch (response.*) {
+        .user_state => |*account| shared.serialization.deinitAccountState(allocator, account),
+        .open_orders => |orders| if (orders.len > 0) allocator.free(orders),
+        .l2_book => |*snapshot| shared.serialization.deinitL2Snapshot(allocator, snapshot),
+        .all_mids => |*all_mids| all_mids.deinit(allocator),
+        else => {},
+    }
+    response.* = undefined;
+}
 
 fn frameTypeForEvent(event: shared.protocol.NodeEvent) shared.protocol.MsgType {
     return switch (event) {

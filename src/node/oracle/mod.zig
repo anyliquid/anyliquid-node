@@ -64,6 +64,8 @@ pub const ValidatorSet = struct {
 pub const OracleConfig = struct {
     max_deviation_bps: u16 = 200,
     min_participants: usize = 2,
+    max_age_ms: i64 = 5_000,
+    now_ms_fn: ?*const fn () i64 = null,
 };
 
 pub const Oracle = struct {
@@ -136,8 +138,12 @@ pub const Oracle = struct {
         }
 
         var total_weight: u64 = 0;
+        const now_ms = if (self.config.now_ms_fn) |clock| clock() else null;
         var sub_it = self.submissions.iterator();
         while (sub_it.next()) |entry| {
+            if (now_ms) |now| {
+                if (entry.value_ptr.timestamp < now - self.config.max_age_ms) continue;
+            }
             const weight = self.validator_set.getWeight(entry.key_ptr.*);
             total_weight += weight;
 
@@ -213,6 +219,30 @@ fn computeWeightedMedian(
         }
     }.lessThan);
 
+    const initial_median = weightedMedianFromSorted(sorted);
+    if (max_deviation_bps == 0 or sorted.len <= 2) return initial_median;
+
+    var filtered = std.ArrayList(PriceEntry).empty;
+    defer filtered.deinit(allocator);
+    for (sorted) |entry| {
+        if (isWithinDeviation(initial_median, entry.price, max_deviation_bps)) {
+            try filtered.append(allocator, entry);
+        }
+    }
+    if (filtered.items.len == 0 or filtered.items.len == sorted.len) {
+        return initial_median;
+    }
+
+    std.mem.sort(PriceEntry, filtered.items, {}, struct {
+        fn lessThan(_: void, a: PriceEntry, b: PriceEntry) bool {
+            return a.price < b.price;
+        }
+    }.lessThan);
+
+    return weightedMedianFromSorted(filtered.items);
+}
+
+fn weightedMedianFromSorted(sorted: []const PriceEntry) shared.types.Price {
     var total_weight: u64 = 0;
     for (sorted) |e| {
         total_weight += e.weight;
@@ -220,18 +250,28 @@ fn computeWeightedMedian(
 
     const half_weight = total_weight / 2;
     var cumulative: u64 = 0;
-    var median_price: shared.types.Price = 0;
-
     for (sorted) |e| {
         cumulative += e.weight;
         if (cumulative >= half_weight) {
-            median_price = e.price;
-            break;
+            return e.price;
         }
     }
 
-    _ = max_deviation_bps;
-    return median_price;
+    return 0;
+}
+
+fn isWithinDeviation(
+    reference_price: shared.types.Price,
+    candidate_price: shared.types.Price,
+    max_deviation_bps: u16,
+) bool {
+    if (reference_price == 0) return true;
+    const diff = if (candidate_price >= reference_price)
+        candidate_price - reference_price
+    else
+        reference_price - candidate_price;
+    const deviation_bps = (@as(u512, diff) * 10_000) / @as(u512, reference_price);
+    return deviation_bps <= max_deviation_bps;
 }
 
 test "five validator submissions produce the median" {
@@ -288,4 +328,35 @@ test "outlier submission is filtered before the median" {
     defer alloc.free(result);
 
     try std.testing.expect(result[0].price < 51000);
+}
+
+test "stale submissions are excluded from aggregation" {
+    const alloc = std.testing.allocator;
+    var validators = [_]ValidatorInfo{
+        .{ .address = [_]u8{1} ** 20, .weight = 1 },
+        .{ .address = [_]u8{2} ** 20, .weight = 1 },
+        .{ .address = [_]u8{3} ** 20, .weight = 1 },
+    };
+    const vset = ValidatorSet.init(&validators);
+
+    const now_ms: i64 = 1_700_000_000_000;
+    var oracle = Oracle.init(vset, .{
+        .max_age_ms = 5_000,
+        .now_ms_fn = struct {
+            fn now() i64 {
+                return 1_700_000_000_000;
+            }
+        }.now,
+    }, alloc);
+    defer oracle.deinit();
+
+    const sig = [_]u8{0} ** 96;
+    try oracle.submitPrices(validators[0].address, &.{.{ .asset_id = 0, .price = 50000 }}, sig, now_ms - 10_000);
+    try oracle.submitPrices(validators[1].address, &.{.{ .asset_id = 0, .price = 50100 }}, sig, now_ms);
+    try oracle.submitPrices(validators[2].address, &.{.{ .asset_id = 0, .price = 50200 }}, sig, now_ms);
+
+    const result = try oracle.aggregate();
+    defer alloc.free(result);
+
+    try std.testing.expect(result[0].price >= 50100);
 }

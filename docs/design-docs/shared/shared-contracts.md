@@ -53,11 +53,22 @@ pub const Order = struct {
 pub const ActionPayload = union(enum) {
     order:                  OrderAction,
     cancel:                 CancelRequest,
+    batch_cancel:           BatchCancelRequest,
     cancel_by_cloid:        CancelByCloidRequest,
+    cancel_all:             CancelAllRequest,
     batch_orders:           []OrderAction,
     update_leverage:        UpdateLeverageRequest,
     update_isolated_margin: UpdateMarginRequest,
     withdraw:               WithdrawRequest,
+};
+
+pub const BatchCancelRequest = struct {
+    order_ids: []const u64,
+};
+
+pub const CancelAllRequest = struct {
+    asset_id: ?u32,
+    include_triggers: bool,
 };
 
 pub const Fill = struct {

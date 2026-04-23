@@ -38,6 +38,7 @@ pub const LiquidationEngine = struct {
             var i: u8 = 0;
             while (i < types.MAX_SUB_ACCOUNTS) : (i += 1) {
                 if (master.sub_accounts[i]) |*sub| {
+                    if (!hasFreshPricingForAllPositions(sub, state)) continue;
                     const summary = margin_engine.compute(sub, state);
                     if (summary.health == .liquidatable) {
                         const covered_equity: shared.types.Quantity = if (summary.total_equity > 0)
@@ -71,28 +72,41 @@ pub const LiquidationEngine = struct {
         return try candidates.toOwnedSlice(self.allocator);
     }
 
-    /// Execute liquidation for a candidate - close all positions and apply to insurance fund.
+    /// Execute liquidation by reducing the largest-risk positions first until the account is healthy
+    /// or every position has been fully closed.
     pub fn execute(
         self: *LiquidationEngine,
         _: types.LiquidationCandidate,
         sub: *account.SubAccount,
+        margin_engine: *const margin_mod.MarginEngine,
         state: *const margin_mod.GlobalState,
     ) !types.LiquidationResult {
         var total_pnl: shared.types.SignedAmount = 0;
         var liquidation_fee_total: shared.types.Quantity = 0;
+        var reduced_notional: shared.types.Quantity = 0;
+        var partially_reduced = false;
 
-        // Close all positions at mark price
-        var it = sub.positions.iterator();
-        while (it.next()) |entry| {
-            const pos = entry.value_ptr;
-            if (state.markPrice(pos.instrument_id)) |mark_px| {
-                const pnl = pos.unrealizedPnl(mark_px);
-                total_pnl += pnl;
+        if (!hasFreshPricingForAllPositions(sub, state)) return error.MarkPriceUnavailable;
 
-                const notional = shared.fixed_point.mulPriceQty(mark_px, pos.size);
-                const liq_fee = @divTrunc(notional * @as(shared.types.Quantity, @intCast(self.cfg.liquidation_fee_bps)), 10_000);
-                liquidation_fee_total += liq_fee;
+        var summary = margin_engine.compute(sub, state);
+        while (summary.health == .liquidatable) {
+            const instrument_id = largestRiskPosition(sub, state) orelse break;
+            const pos = sub.positions.getPtr(instrument_id) orelse break;
+            const mark_px = state.freshMarkPrice(instrument_id) orelse break;
+            const size_to_reduce = liquidationSliceSize(pos.size);
+            if (size_to_reduce < pos.size) partially_reduced = true;
+
+            total_pnl += realizedPnlForSlice(pos.*, size_to_reduce, mark_px);
+            const notional = shared.fixed_point.mulPriceQty(mark_px, size_to_reduce);
+            reduced_notional += notional;
+            const liq_fee = @divTrunc(notional * @as(shared.types.Quantity, @intCast(self.cfg.liquidation_fee_bps)), 10_000);
+            liquidation_fee_total += liq_fee;
+
+            pos.size -= size_to_reduce;
+            if (pos.size == 0) {
+                _ = sub.positions.remove(instrument_id);
             }
+            summary = margin_engine.compute(sub, state);
         }
 
         const net_pnl = total_pnl - @as(shared.types.SignedAmount, @intCast(liquidation_fee_total));
@@ -100,7 +114,9 @@ pub const LiquidationEngine = struct {
         if (net_pnl >= 0) {
             // Surplus - credit to insurance fund
             self.insurance_fund += @as(shared.types.Quantity, @intCast(net_pnl));
-            sub.collateral.assets.clearRetainingCapacity();
+            if (!sub.hasOpenPositions()) {
+                sub.collateral.assets.clearRetainingCapacity();
+            }
         } else {
             // Deficit - debit from insurance fund
             const shortfall = @as(shared.types.Quantity, @intCast(-net_pnl));
@@ -113,17 +129,18 @@ pub const LiquidationEngine = struct {
                     .insurance_fund_delta = -@as(shared.types.SignedAmount, @intCast(shortfall)),
                     .adl_triggered = true,
                     .adl_shortfall = remaining,
+                    .partially_reduced = partially_reduced,
+                    .reduced_notional = reduced_notional,
                 };
             }
         }
-
-        // Clear all positions
-        sub.positions.clearRetainingCapacity();
 
         return .{
             .insurance_fund_delta = net_pnl,
             .adl_triggered = false,
             .adl_shortfall = 0,
+            .partially_reduced = partially_reduced,
+            .reduced_notional = reduced_notional,
         };
     }
 
@@ -149,7 +166,7 @@ pub const LiquidationEngine = struct {
                     if (sub.positions.getPtr(instrument_id)) |pos| {
                         // Only consider opposing side positions
                         if (pos.side != side) {
-                            if (state.markPrice(instrument_id)) |mark_px| {
+                            if (state.freshMarkPrice(instrument_id)) |mark_px| {
                                 const rank = types.adlRank(pos, mark_px);
                                 try candidates.append(self.allocator, .{ .sub = sub, .pos = pos, .rank = rank });
                             }
@@ -174,13 +191,13 @@ pub const LiquidationEngine = struct {
             if (remaining == 0) break;
 
             const pos = candidate_entry.pos;
-            const notional = if (state.markPrice(instrument_id)) |mark_px|
+            const notional = if (state.freshMarkPrice(instrument_id)) |mark_px|
                 shared.fixed_point.mulPriceQty(mark_px, pos.size)
             else
                 continue;
 
             const to_reduce = @min(notional, remaining);
-            const size_to_reduce = @divTrunc(to_reduce * pos.size, notional);
+            const size_to_reduce = @max(@as(shared.types.Quantity, 1), @divTrunc(to_reduce * pos.size, notional));
 
             pos.size -= size_to_reduce;
             remaining -= to_reduce;
@@ -199,6 +216,55 @@ pub const LiquidationEngine = struct {
         };
     }
 };
+
+fn hasFreshPricingForAllPositions(
+    sub: *const account.SubAccount,
+    state: *const margin_mod.GlobalState,
+) bool {
+    var it = sub.positions.iterator();
+    while (it.next()) |entry| {
+        if (state.freshMarkPrice(entry.key_ptr.*) == null) return false;
+    }
+    return true;
+}
+
+fn largestRiskPosition(
+    sub: *const account.SubAccount,
+    state: *const margin_mod.GlobalState,
+) ?types.InstrumentId {
+    var best_id: ?types.InstrumentId = null;
+    var best_notional: shared.types.Quantity = 0;
+
+    var it = sub.positions.iterator();
+    while (it.next()) |entry| {
+        const instrument_id = entry.key_ptr.*;
+        const mark_px = state.freshMarkPrice(instrument_id) orelse continue;
+        const notional = shared.fixed_point.mulPriceQty(mark_px, entry.value_ptr.size);
+        if (best_id == null or notional > best_notional) {
+            best_id = instrument_id;
+            best_notional = notional;
+        }
+    }
+
+    return best_id;
+}
+
+fn liquidationSliceSize(size: shared.types.Quantity) shared.types.Quantity {
+    if (size <= 1) return size;
+    return @max(@as(shared.types.Quantity, 1), size / 2);
+}
+
+fn realizedPnlForSlice(
+    pos: types.Position,
+    close_size: shared.types.Quantity,
+    close_price: shared.types.Price,
+) shared.types.SignedAmount {
+    const diff: i256 = if (pos.side == .long)
+        @as(i256, @intCast(close_price)) - @as(i256, @intCast(pos.entry_price))
+    else
+        @as(i256, @intCast(pos.entry_price)) - @as(i256, @intCast(close_price));
+    return @intCast(@divTrunc(diff * @as(i512, @intCast(close_size)), shared.types.PRICE_SCALE));
+}
 
 test "scan finds account below maintenance margin" {
     const alloc = std.testing.allocator;
@@ -309,10 +375,130 @@ test "liquidation surplus - credited to insurance fund" {
         .snapshot = &.{},
     };
 
-    const result = try engine.execute(candidate, sub, &state);
+    const result = try engine.execute(candidate, sub, &margin_engine, &state);
     try std.testing.expect(result.insurance_fund_delta > 0);
     try std.testing.expect(!result.adl_triggered);
-    _ = margin_engine;
+}
+
+test "stale mark price skips liquidation scan" {
+    const alloc = std.testing.allocator;
+    const master_addr = [_]u8{0xAA} ** 20;
+    var master = account.MasterAccount.init(alloc, master_addr, 0);
+    defer master.deinit();
+
+    const sub = try master.openSubAccount(0, null, 0);
+    try sub.collateral.deposit(types.USDC_ID, 5_000 * types.USDC, &types.defaultCollateralRegistry);
+    sub.positions.put(1, .{
+        .instrument_id = 1,
+        .kind = .{ .perp = .{
+            .tick_size = 1,
+            .lot_size = 1,
+            .max_leverage = 50,
+            .funding_interval_ms = 3_600_000,
+            .mark_method = .oracle,
+            .isolated_only = false,
+        } },
+        .user = sub.address,
+        .size = 1,
+        .side = .long,
+        .entry_price = 100_000,
+        .realized_pnl = 0,
+        .leverage = 50,
+        .margin_mode = .cross,
+        .isolated_margin = 0,
+        .funding_index = 0,
+        .delta = 0,
+        .gamma = 0,
+        .vega = 0,
+        .theta = 0,
+    }) catch {};
+
+    var masters = std.AutoHashMap(shared.types.Address, account.MasterAccount).init(alloc);
+    defer masters.deinit();
+    try masters.put(master_addr, master);
+
+    const now_ms: i64 = 1_700_000_000_000;
+    const state = margin_mod.GlobalState{
+        .markPriceFn = struct {
+            fn mark(_: types.InstrumentId) ?shared.types.Price {
+                return 90_000;
+            }
+        }.mark,
+        .markPriceMetaFn = struct {
+            fn mark(_: types.InstrumentId) ?margin_mod.MarkPriceView {
+                return .{
+                    .price = 90_000,
+                    .updated_at_ms = 1_700_000_000_000 - 30_000,
+                };
+            }
+        }.mark,
+        .now_ms = now_ms,
+        .max_mark_price_age_ms = 5_000,
+    };
+
+    const margin_engine = margin_mod.MarginEngine.init(.{});
+    var engine = LiquidationEngine.init(alloc, 0, .{});
+    const candidates = try engine.scanCandidates(&margin_engine, &masters, &state);
+    defer alloc.free(candidates);
+
+    try std.testing.expectEqual(@as(usize, 0), candidates.len);
+}
+
+test "partial liquidation reduces position before full close" {
+    const alloc = std.testing.allocator;
+    const master_addr = [_]u8{0xAA} ** 20;
+    var master = account.MasterAccount.init(alloc, master_addr, 0);
+    defer master.deinit();
+
+    const sub = try master.openSubAccount(0, null, 0);
+    try sub.collateral.deposit(types.USDC_ID, 11_000 * types.USDC, &types.defaultCollateralRegistry);
+    sub.positions.put(1, .{
+        .instrument_id = 1,
+        .kind = .{ .perp = .{
+            .tick_size = 1,
+            .lot_size = 1,
+            .max_leverage = 50,
+            .funding_interval_ms = 3_600_000,
+            .mark_method = .oracle,
+            .isolated_only = false,
+        } },
+        .user = sub.address,
+        .size = 2,
+        .side = .long,
+        .entry_price = 100_000,
+        .realized_pnl = 0,
+        .leverage = 50,
+        .margin_mode = .cross,
+        .isolated_margin = 0,
+        .funding_index = 0,
+        .delta = 0,
+        .gamma = 0,
+        .vega = 0,
+        .theta = 0,
+    }) catch {};
+
+    const state = margin_mod.GlobalState{
+        .markPriceFn = struct {
+            fn mark(_: types.InstrumentId) ?shared.types.Price {
+                return 95_000;
+            }
+        }.mark,
+        .now_ms = 0,
+    };
+
+    const margin_engine = margin_mod.MarginEngine.init(.{});
+    var engine = LiquidationEngine.init(alloc, 0, .{});
+    const candidate = types.LiquidationCandidate{
+        .user = sub.address,
+        .margin_ratio = 0.5,
+        .deficit = 0,
+        .snapshot = &.{},
+    };
+
+    const result = try engine.execute(candidate, sub, &margin_engine, &state);
+    try std.testing.expect(result.partially_reduced);
+    try std.testing.expect(result.reduced_notional > 0);
+    try std.testing.expectEqual(@as(shared.types.Quantity, 1), sub.positions.get(1).?.size);
 }
 
 test "ADL ranking - higher profit x leverage reduced first" {

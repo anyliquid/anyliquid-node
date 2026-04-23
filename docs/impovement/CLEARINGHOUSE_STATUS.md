@@ -1,7 +1,10 @@
 # Clearinghouse Implementation Status
 
 ## Overview
-The Clearinghouse module has been substantially implemented based on the design specifications in `docs/design-docs/impovement/Cleanhouse.md`. This document tracks the implementation status of all components.
+The Clearinghouse module is the primary execution track for account mutation,
+margining, liquidation, collateral accounting, and perp settlement. This
+document tracks the implementation status of that path based on
+`docs/design-docs/impovement/Cleanhouse.md`.
 
 ## Implemented Components
 
@@ -39,7 +42,8 @@ The Clearinghouse module has been substantially implemented based on the design 
    - Position netting (VWAP entry price)
    - Partial/full/flip close logic
    - Realized PnL computation
-   - Funding index tracking (stub)
+   - Funding rate computation and cumulative funding index tracking
+   - Perp price-band protection against outlier trade prices
 
 6. **Options Clearing** (`src/node/clearinghouse/options.zig`)
    - Options fill settlement
@@ -49,10 +53,11 @@ The Clearinghouse module has been substantially implemented based on the design 
 
 7. **Liquidation Engine** (`src/node/clearinghouse/liquidation.zig`)
    - Liquidation candidate scanning
-   - Liquidation execution (close all positions)
+   - Partial liquidation before full account close-out
    - Insurance fund management
    - ADL (Auto-Deleveraging) ranking
    - ADL execution with position reduction
+   - Stale-mark guard for liquidation scanning
 
 8. **Transfer Engine** (`src/node/clearinghouse/transfer.zig`)
    - Intra-master transfers (between sub-accounts)
@@ -149,10 +154,12 @@ There are a few remaining type mismatches that need to be resolved:
 ### 2. Implement Missing Features (Future Work)
 
 #### High Priority
-- [ ] **Funding Rate Computation** - Complete the funding rate formula implementation
+- [x] **Funding Rate Computation** - Implemented for clearinghouse perp settlement
 - [ ] **Portfolio Margin Full Logic** - Complete auto-borrow and LTV calculations
 - [ ] **Block Execution Pipeline** - Wire clearinghouse into block processing
 - [ ] **Event Emission** - Emit clearinghouse events to subscribers
+- [x] **Action Execution Wiring** - Route IPC and gateway actions into clearinghouse-first execution
+- [x] **Low-Latency Order Queue** - `order` and cancel actions bypass the general `mempool`
 
 #### Medium Priority
 - [ ] **Options Greeks Refresh** - Auto-update Greeks on oracle price changes
@@ -190,6 +197,8 @@ Key design principles maintained:
 - ✅ Sub-account isolation (liquidation never propagates)
 - ✅ Deterministic execution order
 - ✅ Event-sourced architecture support
+- ✅ Stale oracle data does not trigger new liquidations
+- ✅ Perp trade-price protection via price bands
 
 ## Performance Characteristics
 
@@ -220,8 +229,9 @@ The LLVM error suggests the integration tests are too complex for the current te
 
 ### 🔧 Remaining Work
 1. **Debug integration tests** - Simplify test cases or adjust test harness configuration
-2. **Wire into block execution pipeline** - Connect clearinghouse to the node's block processing
+2. **Promote order-core queue beyond harness/IPC** - Integrate with consensus-facing proposer flow
 3. **Add collateral registry to MarginEngine** - Currently using hardcoded default registry
+4. **Complete portfolio margin borrow lifecycle** - Caps, interest accrual, and borrow state transitions
 
 ### 📊 Implementation Metrics
 - **Files created**: 8 new files

@@ -1,5 +1,8 @@
 # Module: Perp Engine
 
+Status: legacy perp prototype. The clearinghouse perp unit is the active design
+for funding settlement, price protection, and liquidation integration.
+
 **File:** `src/node/engine/perp.zig`  
 **Depends on:** `shared/types`, `oracle`
 

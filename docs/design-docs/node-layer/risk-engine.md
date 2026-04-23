@@ -1,5 +1,8 @@
 # Module: Risk Engine
 
+Status: legacy margin prototype. The clearinghouse design under
+`docs/design-docs/impovement/Cleanhouse.md` is the active margining path.
+
 **File:** `src/node/engine/risk.zig`  
 **Depends on:** `shared/types`, `perp` (mark price)
 

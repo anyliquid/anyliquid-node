@@ -218,9 +218,24 @@ fn writeActionPayload(list: *std.ArrayList(u8), allocator: std.mem.Allocator, pa
             try list.append(allocator, 1);
             try writeInt(list, allocator, u64, cancel.order_id);
         },
+        .batch_cancel => |cancel| {
+            try list.append(allocator, 7);
+            try writeInt(list, allocator, u32, @intCast(cancel.order_ids.len));
+            for (cancel.order_ids) |order_id| {
+                try writeInt(list, allocator, u64, order_id);
+            }
+        },
         .cancel_by_cloid => |cancel| {
             try list.append(allocator, 2);
             try list.appendSlice(allocator, cancel.cloid[0..]);
+        },
+        .cancel_all => |cancel| {
+            try list.append(allocator, 8);
+            try list.append(allocator, @intFromBool(cancel.asset_id != null));
+            if (cancel.asset_id) |asset_id| {
+                try writeInt(list, allocator, types.AssetId, asset_id);
+            }
+            try list.append(allocator, @intFromBool(cancel.include_triggers));
         },
         .batch_orders => |orders| {
             try list.append(allocator, 3);
@@ -283,6 +298,22 @@ fn decodeActionPayloadInto(reader: *Reader, allocator: std.mem.Allocator, out: *
             .amount = try reader.readInt(types.Quantity),
             .destination = try reader.readFixed(20),
         } },
+        7 => {
+            const len = try reader.readInt(u32);
+            const order_ids = try allocator.alloc(u64, len);
+            errdefer allocator.free(order_ids);
+            for (order_ids) |*order_id| {
+                order_id.* = try reader.readInt(u64);
+            }
+            out.* = .{ .batch_cancel = .{ .order_ids = order_ids } };
+        },
+        8 => {
+            const has_asset = try reader.readByte();
+            out.* = .{ .cancel_all = .{
+                .asset_id = if (has_asset == 1) try reader.readInt(types.AssetId) else null,
+                .include_triggers = (try reader.readByte()) == 1,
+            } };
+        },
         else => return error.InvalidTag,
     }
 }
@@ -566,7 +597,11 @@ pub fn cloneActionPayload(allocator: std.mem.Allocator, payload: types.ActionPay
     return switch (payload) {
         .order => |order| .{ .order = try cloneOrderAction(allocator, order) },
         .cancel => |cancel| .{ .cancel = cancel },
+        .batch_cancel => |cancel| .{ .batch_cancel = .{
+            .order_ids = try allocator.dupe(u64, cancel.order_ids),
+        } },
         .cancel_by_cloid => |cancel| .{ .cancel_by_cloid = cancel },
+        .cancel_all => |cancel| .{ .cancel_all = cancel },
         .batch_orders => |orders| blk: {
             var cloned = try allocator.alloc(types.OrderAction, orders.len);
             errdefer allocator.free(cloned);
@@ -584,6 +619,7 @@ pub fn cloneActionPayload(allocator: std.mem.Allocator, payload: types.ActionPay
 pub fn deinitActionPayload(allocator: std.mem.Allocator, payload: *types.ActionPayload) void {
     switch (payload.*) {
         .order => |*order| deinitOrderAction(allocator, order),
+        .batch_cancel => |cancel| allocator.free(cancel.order_ids),
         .batch_orders => |orders| {
             for (orders, 0..) |_, idx| {
                 deinitOrderAction(allocator, @constCast(&orders[idx]));
@@ -1134,18 +1170,29 @@ pub fn encodeQueryResponse(allocator: std.mem.Allocator, resp: protocol.QueryRes
 }
 
 pub fn decodeQueryResponse(allocator: std.mem.Allocator, data: []const u8) !protocol.QueryResponse {
-    _ = allocator;
     if (data.len < 1) return error.UnexpectedEndOfStream;
     const tag = data[0];
     return switch (tag) {
         0x81 => .{ .user_state = .{
             .address = data[1..21].*,
-            .balance = std.mem.readInt(u64, data[21..29], .big),
+            .balance = std.mem.readInt(u128, data[21..37], .big),
             .positions = &.{},
             .open_orders = &.{},
             .api_wallet = null,
         } },
-        0x82 => .{ .open_orders = &.{} },
+        0x82 => blk: {
+            if (data.len < 5) return error.UnexpectedEndOfStream;
+            const len = std.mem.readInt(u32, data[1..5], .big);
+            const orders = try allocator.alloc(u64, len);
+            errdefer allocator.free(orders);
+            var idx: usize = 5;
+            for (orders) |*order_id| {
+                if (idx + 8 > data.len) return error.UnexpectedEndOfStream;
+                order_id.* = std.mem.readInt(u64, data[idx .. idx + 8], .big);
+                idx += 8;
+            }
+            break :blk .{ .open_orders = orders };
+        },
         0x83 => .{ .l2_book = .{
             .asset_id = std.mem.readInt(u64, data[1..9], .big),
             .seq = std.mem.readInt(u64, data[9..17], .big),
